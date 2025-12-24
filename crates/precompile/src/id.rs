@@ -42,6 +42,19 @@ pub enum PrecompileId {
     Bls12MapFp2ToGp2,
     /// ECDSA signature verification over the secp256r1 elliptic curve (also known as P-256 or prime256v1).
     P256Verify,
+
+    /// Falcon-512 Hash-to-Point challenge generation using SHAKE256 (NIST-compliant).
+    #[cfg(feature = "falcon")]
+    FalconHashToPointShake256,
+
+    /// Falcon-512 Hash-to-Point challenge generation using a Keccak-based PRNG/XOF (EVM-friendly).
+    #[cfg(all(feature = "falcon", feature = "falcon-keccakprng"))]
+    FalconHashToPointKeccakPrng,
+
+    /// Falcon-512 core signature verification given (signature, public key, hash-to-point challenge).
+    #[cfg(feature = "falcon")]
+    FalconCore,
+    
     /// Custom precompile identifier.
     Custom(Cow<'static, str>),
 }
@@ -76,6 +89,16 @@ impl PrecompileId {
             Self::Bls12MapFpToGp1 => "BLS12_MAP_FP_TO_G1",
             Self::Bls12MapFp2ToGp2 => "BLS12_MAP_FP2_TO_G2",
             Self::P256Verify => "P256VERIFY",
+
+            #[cfg(feature = "falcon")]
+            Self::FalconHashToPointShake256 => "FALCON_H2P_SHAKE256",
+
+            #[cfg(all(feature = "falcon", feature = "falcon-keccakprng"))]
+            Self::FalconHashToPointKeccakPrng => "FALCON_H2P_KECCAKPRNG",
+
+            #[cfg(feature = "falcon")]
+            Self::FalconCore => "FALCON_CORE",
+
             Self::Custom(a) => a.as_ref(),
         }
     }
@@ -145,6 +168,16 @@ impl PrecompileId {
                     crate::secp256r1::P256VERIFY_OSAKA
                 }
             }
+
+            #[cfg(feature = "falcon")]
+            Self::FalconHashToPointShake256 => return None,
+
+            #[cfg(all(feature = "falcon", feature = "falcon-keccakprng"))]
+            Self::FalconHashToPointKeccakPrng => return None,
+
+            #[cfg(feature = "falcon")]
+            Self::FalconCore => return None,
+            
             Self::Custom(_) => return None,
         };
 
