@@ -23,6 +23,9 @@ pub mod secp256k1;
 pub mod secp256r1;
 pub mod utilities;
 
+#[cfg(feature = "falcon")]
+pub mod falcon;
+
 pub use id::PrecompileId;
 pub use interface::*;
 
