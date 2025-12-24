@@ -31,6 +31,9 @@ pub mod falcon_core;
 #[cfg(feature = "falcon-keccakprng")]
 pub mod h2p_keccakprng;
 
+mod error;
+mod utils;
+
 /// Length in bytes of the message input to Falcon verification.
 ///
 /// Falcon precompiles operate on a fixed 32-byte message hash,
