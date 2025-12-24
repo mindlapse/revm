@@ -3805,6 +3805,7 @@ dependencies = [
  "rstest",
  "secp256k1 0.31.1",
  "sha2",
+ "sha3",
  "substrate-bn",
 ]
 

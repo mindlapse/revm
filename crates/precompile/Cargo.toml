@@ -37,6 +37,7 @@ secp256k1 = { workspace = true, features = [
 
 # SHA2-256 and RIPEMD-160
 sha2.workspace = true
+sha3 = { workspace = true, optional = true, default-features = false }
 ripemd.workspace = true
 
 # Optionally use substrate implementation for eip1962
@@ -81,6 +82,7 @@ std = [
 	"k256/std",
 	"ripemd/std",
 	"sha2/std",
+	"sha3?/std",
 	"c-kzg?/std",
 	"secp256k1?/std",
 	"ark-bn254/std",
@@ -95,7 +97,8 @@ std = [
 hashbrown = ["primitives/hashbrown"]
 asm-keccak = ["primitives/asm-keccak"]
 asm-sha2 = ["sha2/asm"]
-
+falcon = ["dep:sha3"]
+falcon-keccakprng = ["falcon"]
 
 # Enables the c-kzg point evaluation precompile. Enabled by default as most stable/used implementation.
 c-kzg = ["dep:c-kzg"]
