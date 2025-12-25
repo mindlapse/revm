@@ -1,16 +1,19 @@
 //! Falcon-internal error reasons.
 //! These errors are only used within the falcon precompiles and are not part of the exposed interface.
-
+///
 /// These errors are *not* intended to be part of the public precompile interface.
 /// Falcon precompile entrypoints should generally convert these into "empty output"
 /// (ECRECOVER-style) while still charging the fixed gas cost.
+///
+/// # Semantics
+/// All `FalconError` values represent *soft failures*:
+/// they must never cause the precompile to return a hard error.
+/// Precompile entrypoints are expected to convert these into
+/// empty output while still charging the fixed gas cost.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FalconError {
     /// Input length does not match the expected ABI for this precompile function.
-    InvalidInputLength {
-        expected: usize,
-        got: usize,
-    },
+    InvalidInputLength { wanted: usize, got: usize },
 
     /// Encountered a non-canonical or otherwise invalid field element encoding.
     InvalidFieldElement,
@@ -20,10 +23,7 @@ pub(super) enum FalconError {
 
     /// Behavior depends on a spec feature gate that is disabled / not finalized.
     SpecNotFinalized,
-
 }
-
-
 
 #[cfg(feature = "std")]
 mod std_impls {
@@ -34,8 +34,11 @@ mod std_impls {
     impl std::fmt::Display for FalconError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
-                FalconError::InvalidInputLength { expected, got } => {
-                    write!(f, "falcon: invalid input length (expected {expected}, got {got})")
+                FalconError::InvalidInputLength { wanted, got } => {
+                    write!(
+                        f,
+                        "falcon: invalid input length (wanted {wanted}, got {got})"
+                    )
                 }
                 FalconError::InvalidFieldElement => write!(f, "falcon: invalid field element"),
                 FalconError::DecompressionFailed => write!(f, "falcon: decompression failed"),

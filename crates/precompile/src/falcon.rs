@@ -23,14 +23,15 @@
 //! devnets, or experimental forks) can register Falcon precompiles at explicit addresses without
 //! changing the default precompile sets.
 
-use crate::{ Address, Precompile, PrecompileId };
+use crate::{Address, Precompile, PrecompileId};
 
-pub mod h2p_shake256;
 pub mod falcon_core;
+pub mod h2p_shake256;
 
 #[cfg(feature = "falcon-keccakprng")]
 pub mod h2p_keccakprng;
 
+mod encoding;
 mod error;
 mod utils;
 
@@ -57,6 +58,18 @@ pub const PK_LEN: usize = 897;
 /// packed as 14-bit big-endian integers.
 pub const CHALLENGE_LEN: usize = 897;
 
+/// Length in bytes of the salt that forms the prefix of a Falcon-512 compressed signature.
+pub const SALT_LEN: usize = 40;
+
+/// Length in bytes of the non-salt tail segment of a Falcon-512 compressed signature.
+pub const S2_COMPRESSED_LEN: usize = SIG_LEN - SALT_LEN;
+
+/// Compile-time enforcement that SIG_LEN = SALT_LEN + S2_COMPRESSED_LEN
+const _: [(); SIG_LEN] = [(); SALT_LEN + S2_COMPRESSED_LEN];
+
+
+type FalconCoreInputs<'a> = (&'a [u8; SIG_LEN], &'a [u8; PK_LEN], &'a [u8; CHALLENGE_LEN]);
+type H2PInputs<'a> = (&'a [u8; MSG_LEN], &'a [u8; SIG_LEN]);
 
 /// Addresses for Falcon-related precompiled contracts.
 ///
@@ -67,13 +80,12 @@ pub const CHALLENGE_LEN: usize = 897;
 /// custom layouts.
 #[derive(Debug)]
 pub struct FalconAddresses {
-    
     /// Address of the SHAKE256-based Hash-to-Point precompile.
     pub h2p_shake256: Address,
 
     /// Address of the Falcon core verification precompile.
     pub falcon_core: Address,
-    
+
     /// Address of the Keccak-PRNG-based Hash-to-Point precompile.
     #[cfg(feature = "falcon-keccakprng")]
     pub h2p_keccakprng: Address,
@@ -87,7 +99,6 @@ pub struct FalconAddresses {
 /// downstream users.
 #[derive(Debug)]
 pub struct FalconPrecompiles {
-
     /// SHAKE256-based Hash-to-Point precompile.
     pub h2p_shake256: Precompile,
 
@@ -110,10 +121,22 @@ pub struct FalconPrecompiles {
 /// under active discussion and address allocation is not finalized.
 pub fn precompiles_with_addresses(addrs: FalconAddresses) -> FalconPrecompiles {
     FalconPrecompiles {
-        h2p_shake256: Precompile::new(PrecompileId::FalconHashToPointShake256, addrs.h2p_shake256, h2p_shake256::h2p_shake256),
-        falcon_core: Precompile::new(PrecompileId::FalconCore, addrs.falcon_core, falcon_core::falcon_core),
+        h2p_shake256: Precompile::new(
+            PrecompileId::FalconHashToPointShake256,
+            addrs.h2p_shake256,
+            h2p_shake256::h2p_shake256,
+        ),
+        falcon_core: Precompile::new(
+            PrecompileId::FalconCore,
+            addrs.falcon_core,
+            falcon_core::falcon_core,
+        ),
 
         #[cfg(feature = "falcon-keccakprng")]
-        h2p_keccakprng: Precompile::new(PrecompileId::FalconHashToPointKeccakPrng, addrs.h2p_keccakprng, h2p_keccakprng::h2p_keccakprng),
+        h2p_keccakprng: Precompile::new(
+            PrecompileId::FalconHashToPointKeccakPrng,
+            addrs.h2p_keccakprng,
+            h2p_keccakprng::h2p_keccakprng,
+        ),
     }
 }

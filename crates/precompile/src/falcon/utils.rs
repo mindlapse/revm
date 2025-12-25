@@ -2,8 +2,8 @@
 
 use primitives::Bytes;
 
-use crate::{PrecompileError, PrecompileOutput, PrecompileResult};
 use crate::falcon::error::FalconError;
+use crate::{PrecompileError, PrecompileOutput, PrecompileResult};
 
 /// Fixed-cost precompile pattern:
 /// - If OOG: return Err(OutOfGas)
@@ -40,7 +40,10 @@ mod tests {
 
     #[test]
     fn test_transform_falcon_result_invalid_input_length() {
-        let res = Err(FalconError::InvalidInputLength { expected: 32, got: 16 });
+        let res = Err(FalconError::InvalidInputLength {
+            wanted: 32,
+            got: 16,
+        });
         let result = map_falcon_result(res, 55);
         assert_eq!(result, Ok(PrecompileOutput::new(55, Bytes::new())));
     }
