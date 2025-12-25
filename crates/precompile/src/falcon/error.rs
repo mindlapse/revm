@@ -21,8 +21,6 @@ pub(super) enum FalconError {
     /// Behavior depends on a spec feature gate that is disabled / not finalized.
     SpecNotFinalized,
 
-    /// If the caller doesn't have enough gas to pay for the operation.
-    OutOfGas
 }
 
 
@@ -42,7 +40,6 @@ mod std_impls {
                 FalconError::InvalidFieldElement => write!(f, "falcon: invalid field element"),
                 FalconError::DecompressionFailed => write!(f, "falcon: decompression failed"),
                 FalconError::SpecNotFinalized => write!(f, "falcon: spec not finalized"),
-                FalconError::OutOfGas => write!(f, "falcon: out of gas"),
             }
         }
     }
