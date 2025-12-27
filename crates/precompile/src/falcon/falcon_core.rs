@@ -6,7 +6,12 @@
 //! Hash-to-Point construction used to derive the challenge.
 
 use crate::{
-    falcon::{encoding, error::FalconError, utils::map_falcon_result, FalconCoreInputs},
+    falcon::{
+        encoding::{self, unpack_falcon_14bit_be_polynomial},
+        error::FalconError,
+        utils::map_falcon_result,
+        FALCON_N,
+    },
     PrecompileError, PrecompileOutput, PrecompileResult,
 };
 
@@ -26,34 +31,30 @@ fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
 
     Err(FalconError::SpecNotFinalized)
 }
+
+type SignatureBytes = [u8; 666];
+type UnpackedPk = [u16; FALCON_N];
+type UnpackedChallenge = [u16; FALCON_N];
+
 #[inline]
-fn extract_inputs_if_valid<'a>(input: &'a [u8]) -> Result<FalconCoreInputs<'a>, FalconError> {
-    let core_inputs = encoding::split_falcon_core_input(input)?;
+fn extract_inputs_if_valid<'a>(
+    input: &'a [u8],
+) -> Result<(&'a SignatureBytes, UnpackedPk, UnpackedChallenge), FalconError> {
+    let (sig, pk, challenge) = encoding::split_falcon_core_input(input)?;
 
-    // TODO additional validations
+    let pk_unpacked = unpack_falcon_14bit_be_polynomial(pk)?;
+    let challenge_unpacked = unpack_falcon_14bit_be_polynomial(challenge)?;
 
-    Ok(core_inputs)
+    Ok((sig, pk_unpacked, challenge_unpacked))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::falcon::utils::test::{create_packed_falcon_polynomial, sample_14bit_coeff};
     use crate::falcon::{CHALLENGE_LEN, PK_LEN, SIG_LEN};
-
-    #[test]
-    fn test_extract_inputs_if_valid_with_valid_length() {
-        // Assuming parse_falcon_core_input expects input of SIG_LEN + PK_LEN + CHALLENGE_LEN
-        let mut input = Vec::new();
-        input.extend(vec![1u8; SIG_LEN]);
-        input.extend(vec![2u8; PK_LEN]);
-        input.extend(vec![3u8; CHALLENGE_LEN]);
-        let result = extract_inputs_if_valid(&input);
-        assert!(result.is_ok());
-        let (sig, pk, challenge) = result.unwrap();
-        assert_eq!(sig, &vec![1u8; SIG_LEN][..]);
-        assert_eq!(pk, &vec![2u8; PK_LEN][..]);
-        assert_eq!(challenge, &vec![3u8; CHALLENGE_LEN][..]);
-    }
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     #[test]
     fn test_extract_inputs_if_valid_with_invalid_length() {
@@ -105,5 +106,76 @@ mod tests {
         let result = falcon_core(&input, gas_limit);
         // Should not be OutOfGas, but should fail with SpecNotFinalized
         assert!(!matches!(result, Err(PrecompileError::OutOfGas)));
+    }
+
+    #[test]
+    fn test_extract_inputs_if_valid_roundtrip_seeded_coefficients() {
+        // Deterministic seeded RNG so the test is reproducible.
+        let mut rng = StdRng::seed_from_u64(0xABCD1234);
+
+        // Seeded-random signature bytes.
+        let mut sig = [0u8; SIG_LEN];
+        for b in sig.iter_mut() {
+            *b = rng.random::<u8>();
+        }
+
+        // Seeded-random valid coefficients (< q) for pk and challenge.
+        let mut pk_coeffs = [0u16; FALCON_N];
+        let mut challenge_coeffs = [0u16; FALCON_N];
+        for i in 0..FALCON_N {
+            pk_coeffs[i] = sample_14bit_coeff(&mut rng, true);
+            challenge_coeffs[i] = sample_14bit_coeff(&mut rng, true);
+        }
+
+        let pk_packed = create_packed_falcon_polynomial(&pk_coeffs);
+        let challenge_packed = create_packed_falcon_polynomial(&challenge_coeffs);
+
+        // One contiguous input buffer: sig || pk || challenge
+        let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
+        input.extend_from_slice(&sig);
+        input.extend_from_slice(&pk_packed);
+        input.extend_from_slice(&challenge_packed);
+
+        let (sig_out, pk_unpacked, challenge_unpacked) = extract_inputs_if_valid(&input).unwrap();
+
+        assert_eq!(sig_out, &sig);
+        assert_eq!(pk_unpacked, pk_coeffs);
+        assert_eq!(challenge_unpacked, challenge_coeffs);
+    }
+
+    #[test]
+    fn test_extract_inputs_if_valid_with_challenge_coefficient_equal_q() {
+        // Deterministic seeded RNG so the test is reproducible.
+        let mut rng = StdRng::seed_from_u64(0xABCD1234);
+
+        // Seeded-random signature bytes.
+        let mut sig = [0u8; SIG_LEN];
+        for b in sig.iter_mut() {
+            *b = rng.random::<u8>();
+        }
+
+        // Seeded-random valid coefficients (< q) for pk and challenge.
+        let mut pk_coeffs = [0u16; FALCON_N];
+        let mut challenge_coeffs = [0u16; FALCON_N];
+        for i in 0..FALCON_N {
+            pk_coeffs[i] = sample_14bit_coeff(&mut rng, true);
+            challenge_coeffs[i] = sample_14bit_coeff(&mut rng, true);
+        }
+
+        // Set one challenge coefficient to the invalid value 12289 (equal to q).
+        challenge_coeffs[123] = 12289u16;
+
+        let pk_packed = create_packed_falcon_polynomial(&pk_coeffs);
+        let challenge_packed = create_packed_falcon_polynomial(&challenge_coeffs);
+
+        // One contiguous input buffer: sig || pk || challenge
+        let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
+        input.extend_from_slice(&sig);
+        input.extend_from_slice(&pk_packed);
+        input.extend_from_slice(&challenge_packed);
+
+        let result = extract_inputs_if_valid(&input);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
     }
 }

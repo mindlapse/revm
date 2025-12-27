@@ -54,7 +54,7 @@ pub enum PrecompileId {
     /// Falcon-512 core signature verification given (signature, public key, hash-to-point challenge).
     #[cfg(feature = "falcon")]
     FalconCore,
-    
+
     /// Custom precompile identifier.
     Custom(Cow<'static, str>),
 }
@@ -177,7 +177,7 @@ impl PrecompileId {
 
             #[cfg(feature = "falcon")]
             Self::FalconCore => return None,
-            
+
             Self::Custom(_) => return None,
         };
 

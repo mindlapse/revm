@@ -64,9 +64,17 @@ pub const SALT_LEN: usize = 40;
 /// Length in bytes of the non-salt tail segment of a Falcon-512 compressed signature.
 pub const S2_COMPRESSED_LEN: usize = SIG_LEN - SALT_LEN;
 
+/// Falcon modulus q used for all polynomial arithmetic.
+const FALCON_Q: u16 = 12289;
+
+/// Falcon-512 lattice dimension (polynomial degree).
+const FALCON_N: usize = 512;
+
+/// Bit width used to encode Falcon coefficients (14 bits per coefficient).
+const COEFF_BITS: u32 = 14;
+
 /// Compile-time enforcement that SIG_LEN = SALT_LEN + S2_COMPRESSED_LEN
 const _: [(); SIG_LEN] = [(); SALT_LEN + S2_COMPRESSED_LEN];
-
 
 type FalconCoreInputs<'a> = (&'a [u8; SIG_LEN], &'a [u8; PK_LEN], &'a [u8; CHALLENGE_LEN]);
 type H2PInputs<'a> = (&'a [u8; MSG_LEN], &'a [u8; SIG_LEN]);

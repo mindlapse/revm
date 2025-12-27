@@ -1,6 +1,6 @@
 use crate::falcon::{
-    error::FalconError, FalconCoreInputs, H2PInputs, CHALLENGE_LEN, MSG_LEN, PK_LEN,
-    S2_COMPRESSED_LEN, SALT_LEN, SIG_LEN,
+    error::FalconError, FalconCoreInputs, H2PInputs, CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q,
+    MSG_LEN, PK_LEN, S2_COMPRESSED_LEN, SALT_LEN, SIG_LEN,
 };
 
 /// Ensures `input` is exactly `wanted` bytes long.
@@ -107,7 +107,6 @@ pub(super) fn split_falcon_core_input<'a>(
 pub(super) fn split_sig(
     sig: &[u8; SIG_LEN],
 ) -> Result<(&[u8; SALT_LEN], &[u8; S2_COMPRESSED_LEN]), FalconError> {
-
     let (r, s2) = sig.split_at(SALT_LEN);
     Ok((
         read_fixed::<SALT_LEN>(r)?,
@@ -115,9 +114,90 @@ pub(super) fn split_sig(
     ))
 }
 
+/// Unpack a packed 14-bit big-endian Falcon polynomial into 512 coefficients,
+/// validating each coefficient is < q. Also enforces canonical padding if present.
+///
+/// Layout:
+/// - 512 coefficients × 14 bits = 7168 bits = 896 bytes of coefficient data.
+/// - If `input_len` is 897, the final byte is padding and must be 0.
+#[inline]
+pub(super) fn unpack_falcon_14bit_be_polynomial<const INPUT_LEN: usize>(
+    input: &[u8; INPUT_LEN],
+) -> Result<[u16; FALCON_N], FalconError> {
+    // You can use this helper for both public key and challenge bits without duplicating logic.
+
+    // Determine how many bytes actually carry coefficient bits.
+    // 512*14 bits = 896 bytes exactly.
+    const COEFF_BYTES: usize = (FALCON_N * COEFF_BITS as usize) / 8; // 896
+
+    // Enforce 897 bits
+    if INPUT_LEN != COEFF_BYTES + 1 {
+        return Err(FalconError::InvalidInputLength {
+            wanted: COEFF_BYTES, // or wanted: your chosen constant
+            got: INPUT_LEN,
+        });
+    }
+
+    // If there is a padding byte, require it to be zero for canonical encoding.
+    if input[COEFF_BYTES] != 0 {
+        return Err(FalconError::InvalidFieldElement);
+    }
+
+    let mut out = [0u16; FALCON_N];
+
+    let mut acc: u32 = 0;
+    let mut acc_bits: u32 = 0;
+    let mut out_i: usize = 0;
+
+    for &b in &input[..COEFF_BYTES] {
+        acc = (acc << 8) | (b as u32);
+        acc_bits += 8;
+
+        while acc_bits >= COEFF_BITS && out_i < FALCON_N {
+            let shift = acc_bits - COEFF_BITS;
+            let v = acc >> shift;
+            acc_bits -= COEFF_BITS;
+
+            // Keep only the remaining lower acc_bits bits.
+            if acc_bits == 0 {
+                acc = 0;
+            } else {
+                acc &= (1u32 << acc_bits) - 1;
+            }
+
+            // Range check - ensure each polynomial coefficient is strictly less than Q = 12289
+            if v >= (FALCON_Q as u32) {
+                return Err(FalconError::InvalidFieldElement);
+            }
+
+            out[out_i] = v as u16;
+            out_i += 1;
+        }
+    }
+
+    // Must have produced exactly 512 coefficients.
+    // If not, the input was malformed (shouldn't happen with fixed lengths, defensive only)
+    if out_i != FALCON_N {
+        return Err(FalconError::InvalidFieldElement);
+    }
+
+    // Also ensure we didn't have leftover bits that imply non-canonical encoding.
+    // With 896 bytes and 14-bit chunks, acc_bits should end at 0 exactly.
+    if acc_bits != 0 {
+        return Err(FalconError::InvalidFieldElement);
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
+    use rand::Rng;
+
     use super::*;
+    use crate::falcon::utils::test::{
+        create_packed_falcon_polynomial, create_sample_falcon_coefficients, sample_14bit_coeff,
+    };
 
     #[test]
     fn test_require_len_ok() {
@@ -396,5 +476,56 @@ mod tests {
         let (salt, s2) = split_sig(&sig).unwrap();
         assert_eq!(salt, &[9u8; SALT_LEN]);
         assert_eq!(s2, &[0u8; S2_COMPRESSED_LEN]);
+    }
+
+    #[test]
+    fn test_unpack_falcon_14bit_be_polynomial_all_zero_input_yields_all_zero_output() {
+        // 512 coefficients × 14 bits = 896 bytes, plus 1 padding byte = 897 total.
+        let input = [0u8; CHALLENGE_LEN];
+
+        let poly = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&input).unwrap();
+
+        assert_eq!(poly, [0u16; FALCON_N]);
+    }
+
+    #[test]
+    fn test_unpack_falcon_14bit_be_polynomial_invalid_if_coeff_ge_12289() {
+        let mut rng = rand::rng();
+        // Repeat the test for every coefficient position, setting
+        // exactly one of them to be FALCON_Q or above.
+        for i in 0..FALCON_N {
+            let mut coeffs = create_sample_falcon_coefficients();
+            coeffs[i] = sample_14bit_coeff(&mut rng, false);
+
+            let polynomial = create_packed_falcon_polynomial(&coeffs);
+
+            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
+        }
+    }
+
+    #[test]
+    fn test_unpack_falcon_14bit_be_polynomial_valid_if_coeff_lt_12289() {
+        // try 512 random valid sets of coefficients
+        for _ in 0..512 {
+            let coeffs = create_sample_falcon_coefficients();
+            let polynomial = create_packed_falcon_polynomial(&coeffs);
+
+            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), coeffs);
+        }
+    }
+
+    #[test]
+    fn test_unpack_falcon_14bit_be_polynomial_invalid_if_last_byte_nonzero() {
+        let mut rng = rand::rng();
+        for _ in 0..128 {
+            let coeffs = create_sample_falcon_coefficients();
+            let mut polynomial = create_packed_falcon_polynomial(&coeffs);
+            polynomial[896] = rng.random_range(1..255);
+            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
+        }
     }
 }
