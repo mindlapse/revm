@@ -51,7 +51,8 @@ fn extract_inputs_if_valid<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::falcon::utils::test::{create_packed_falcon_polynomial, sample_14bit_coeff};
+    use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
+    use crate::falcon::utils::test::sample_14bit_coeff;
     use crate::falcon::{CHALLENGE_LEN, PK_LEN, SIG_LEN};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -127,8 +128,8 @@ mod tests {
             challenge_coeffs[i] = sample_14bit_coeff(&mut rng, true);
         }
 
-        let pk_packed = create_packed_falcon_polynomial(&pk_coeffs);
-        let challenge_packed = create_packed_falcon_polynomial(&challenge_coeffs);
+        let pk_packed = pack_falcon_14bit_be_polynomial(&pk_coeffs).unwrap();
+        let challenge_packed = pack_falcon_14bit_be_polynomial(&challenge_coeffs).unwrap();
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
@@ -165,8 +166,8 @@ mod tests {
         // Set one challenge coefficient to the invalid value 12289 (equal to q).
         challenge_coeffs[123] = 12289u16;
 
-        let pk_packed = create_packed_falcon_polynomial(&pk_coeffs);
-        let challenge_packed = create_packed_falcon_polynomial(&challenge_coeffs);
+        let pk_packed = pack_falcon_14bit_be_polynomial(&pk_coeffs).unwrap();
+        let challenge_packed = pack_falcon_14bit_be_polynomial(&challenge_coeffs).unwrap();
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);

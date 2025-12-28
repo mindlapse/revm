@@ -10,7 +10,7 @@
 //! provided that the signature was generated using the same H2P method.
 
 use crate::{
-    falcon::{error::FalconError, utils::map_falcon_result, FalconCoreInputs, H2PInputs},
+    falcon::{error::FalconError, utils::map_falcon_result, H2PInputs},
     PrecompileError, PrecompileOutput, PrecompileResult,
 };
 use sha3 as _;

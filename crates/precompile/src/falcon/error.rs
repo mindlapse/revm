@@ -15,6 +15,9 @@ pub(super) enum FalconError {
     /// Input length does not match the expected ABI for this precompile function.
     InvalidInputLength { wanted: usize, got: usize },
 
+    /// Unexpected encoding error occurred during bit packing/unpacking (panic-free handling)
+    InternalEncoding,
+
     /// Encountered a non-canonical or otherwise invalid field element encoding.
     InvalidFieldElement,
 
@@ -34,6 +37,7 @@ mod std_impls {
     impl std::fmt::Display for FalconError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
+                FalconError::InternalEncoding => write!(f, "falcon: internal encoding error"),
                 FalconError::InvalidInputLength { wanted, got } => {
                     write!(
                         f,
