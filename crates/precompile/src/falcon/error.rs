@@ -21,9 +21,6 @@ pub(super) enum FalconError {
     /// Encountered a non-canonical or otherwise invalid field element encoding.
     InvalidFieldElement,
 
-    /// Decompression (e.g., point/polynomial decoding) failed.
-    DecompressionFailed,
-
     /// Behavior depends on a spec feature gate that is disabled / not finalized.
     SpecNotFinalized,
 }
@@ -45,7 +42,6 @@ mod std_impls {
                     )
                 }
                 FalconError::InvalidFieldElement => write!(f, "falcon: invalid field element"),
-                FalconError::DecompressionFailed => write!(f, "falcon: decompression failed"),
                 FalconError::SpecNotFinalized => write!(f, "falcon: spec not finalized"),
             }
         }

@@ -25,7 +25,10 @@
 
 use crate::{Address, Precompile, PrecompileId};
 
-pub mod falcon_core;
+pub(crate) mod falcon_core;
+pub(crate) mod falcon_precompiles;
+pub(crate) use falcon_precompiles as crypto_backend;
+
 pub mod h2p_shake256;
 
 #[cfg(feature = "falcon-keccakprng")]
@@ -46,17 +49,21 @@ pub const MSG_LEN: usize = 32;
 /// This includes the salt and compressed signature vector as defined by EIP-8052.
 pub const SIG_LEN: usize = 666;
 
+/// Length in bytes of 512 14-bit coefficients packed together and a padding byte,
+/// used for public keys in falcon signatures, and for falcon challenge polynomials.
+pub const PACKED_POLY_LEN: usize = 897;
+
 /// Length in bytes of a Falcon-512 public key.
 ///
 /// Public keys encode a degree-512 polynomial modulo q=12289 using
 /// a packed 14-bit-per-coefficient representation.
-pub const PK_LEN: usize = 897;
+pub const PK_LEN: usize = PACKED_POLY_LEN;
 
 /// Length in bytes of a packed Falcon challenge polynomial.
 ///
 /// The challenge polynomial consists of 512 coefficients modulo q=12289,
 /// packed as 14-bit big-endian integers.
-pub const CHALLENGE_LEN: usize = 897;
+pub const CHALLENGE_LEN: usize = PACKED_POLY_LEN;
 
 /// Length in bytes of the salt that forms the prefix of a Falcon-512 compressed signature.
 pub const SALT_LEN: usize = 40;

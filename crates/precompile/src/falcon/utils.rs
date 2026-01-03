@@ -58,13 +58,6 @@ pub(in crate::falcon) mod test {
     }
 
     #[test]
-    fn test_transform_falcon_result_decompression_failed() {
-        let res = Err(FalconError::DecompressionFailed);
-        let result = map_falcon_result(res, 88);
-        assert_eq!(result, Ok(PrecompileOutput::new(88, Bytes::new())));
-    }
-
-    #[test]
     fn test_transform_falcon_result_spec_not_finalized() {
         let res = Err(FalconError::SpecNotFinalized);
         let result = map_falcon_result(res, 99);

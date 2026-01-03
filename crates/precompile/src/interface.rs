@@ -6,6 +6,9 @@ use std::{borrow::Cow, boxed::Box, string::String, vec::Vec};
 
 use crate::bls12_381::{G1Point, G1PointScalar, G2Point, G2PointScalar};
 
+#[cfg(feature = "falcon")]
+use crate::falcon::{MSG_LEN, PACKED_POLY_LEN, PK_LEN, SIG_LEN};
+
 /// Global crypto provider instance
 static CRYPTO: OnceLock<Box<dyn Crypto>> = OnceLock::new();
 
@@ -193,6 +196,67 @@ pub trait Crypto: Send + Sync + Debug {
     /// BLS12-381 map field element to G2.
     fn bls12_381_fp2_to_g2(&self, fp2: ([u8; 48], [u8; 48])) -> Result<[u8; 192], PrecompileError> {
         crate::bls12_381::crypto_backend::map_fp2_to_g2_bytes(&fp2.0, &fp2.1)
+    }
+
+    /// Falcon hash-to-point using SHAKE256 (XOF) as specified by the Falcon scheme.
+    ///
+    /// Derives the packed challenge polynomial from `(salt || m)`, where `salt` is
+    /// extracted from the raw signature encoding `sig` and `m` is the 32-byte hash
+    /// from the message used to create the signature.
+    ///
+    /// The challenge polynomial is a canonical packed representation (length
+    /// `PACKED_POLY_LEN`) of 512 coefficients modulo q=12289, used when calling
+    /// `falcon_core_verify` to check if the signature of the message hash is valid.
+    /// Note: sig` is used only for salt extraction; no cryptographic verification is performed.
+    #[cfg(feature = "falcon")]
+    fn falcon_h2p_shake256(
+        &self,
+        _m: &[u8; MSG_LEN],
+        _sig: &[u8; SIG_LEN],
+    ) -> Result<[u8; PACKED_POLY_LEN], PrecompileError> {
+        Err(PrecompileError::other_static("falcon: not yet implemented"))
+    }
+
+    /// Falcon hash-to-point using Keccak-PRNG as specified by the Falcon scheme.
+    ///
+    /// Derives the packed challenge polynomial from `(salt || m)`, where `salt` is
+    /// extracted from the raw signature encoding `sig` and `m` is the 32-byte hash
+    /// from the message used to create the signature.
+    ///
+    /// The challenge polynomial is a canonical packed representation (length
+    /// `PACKED_POLY_LEN`) of 512 coefficients modulo q=12289, used when calling
+    /// `falcon_core_verify` to check if the signature of the message hash is valid.
+    /// Note: sig` is used only for salt extraction; no cryptographic verification is performed.
+    #[cfg(feature = "falcon-keccakprng")]
+    fn falcon_h2p_keccakprng(
+        &self,
+        _m: &[u8; MSG_LEN],
+        _sig: &[u8; SIG_LEN],
+    ) -> Result<[u8; PACKED_POLY_LEN], PrecompileError> {
+        Err(PrecompileError::other_static(
+            "falcon: keccakprng not yet implemented",
+        ))
+    }
+
+    /// Verify a Falcon signature using the provided public key and challenge polynomial.
+    /// The challenge is obtained either from falcon_h2p_shake256 or falcon_h2p_keccakprng.
+    ///
+    /// Inputs are fully canonical:
+    /// - `sig` is the raw signature encoding (includes salt + compressed `s2`),
+    /// - `pk` is the raw public key encoding,
+    /// - `challenge` is the packed challenge polynomial derived by H2P.
+    ///
+    /// Returns `Ok(true)` iff the signature verifies under Falcon verification rules.
+    /// Returns `Ok(false)` for a normal verification failure (well-formed but invalid).
+    /// Returns `Err(_)` only for malformed encodings / invalid lengths / disabled feature.
+    #[cfg(feature = "falcon")]
+    fn falcon_core_verify(
+        &self,
+        _sig: &[u8; SIG_LEN],
+        _pk: &[u8; PK_LEN],
+        _challenge: &[u8; PACKED_POLY_LEN],
+    ) -> Result<bool, PrecompileError> {
+        Err(PrecompileError::other_static("falcon: not yet implemented"))
     }
 }
 
