@@ -24,7 +24,7 @@ pub(super) fn map_falcon_result(
 
 #[cfg(test)]
 pub(in crate::falcon) mod test {
-    use crate::falcon::{FALCON_N, FALCON_Q};
+    use crate::falcon::{CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q};
 
     use super::*;
 
@@ -83,6 +83,31 @@ pub(in crate::falcon) mod test {
             };
             if ok {
                 return val;
+            }
+        }
+    }
+
+    // Overwrite the 14-bit big-endian coefficient at `coeff_index` in-place.
+    pub(in crate::falcon) fn set_coeff_14bit_be(
+        buf: &mut [u8; CHALLENGE_LEN],
+        coeff_index: usize,
+        val: u16,
+    ) {
+        debug_assert!(coeff_index < FALCON_N);
+        debug_assert!((val as u32) < (1u32 << COEFF_BITS));
+
+        let bit_pos = coeff_index * (COEFF_BITS as usize);
+        for j in 0..(COEFF_BITS as usize) {
+            let bit = ((val >> ((COEFF_BITS as usize - 1) - j)) & 1) as u8;
+            let global = bit_pos + j;
+            let byte_index = global / 8;
+            let bit_in_byte = global % 8;
+            let mask = 1u8 << (7 - bit_in_byte);
+
+            if bit == 1 {
+                buf[byte_index] |= mask;
+            } else {
+                buf[byte_index] &= !mask;
             }
         }
     }

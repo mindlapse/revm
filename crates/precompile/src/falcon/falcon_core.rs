@@ -54,8 +54,8 @@ fn extract_inputs_if_valid<'a>(
 mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
-    use crate::falcon::utils::test::sample_14bit_coeff;
-    use crate::falcon::{CHALLENGE_LEN, PK_LEN, SIG_LEN};
+    use crate::falcon::utils::test::{sample_14bit_coeff, set_coeff_14bit_be};
+    use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, SIG_LEN};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -165,11 +165,13 @@ mod tests {
             challenge_coeffs[i] = sample_14bit_coeff(&mut rng, true);
         }
 
-        // Set one challenge coefficient to the invalid value 12289 (equal to q).
-        challenge_coeffs[123] = 12289u16;
-
         let pk_packed = pack_falcon_14bit_be_polynomial(&pk_coeffs).unwrap();
-        let challenge_packed = pack_falcon_14bit_be_polynomial(&challenge_coeffs).unwrap();
+        let mut challenge_packed = pack_falcon_14bit_be_polynomial(&challenge_coeffs).unwrap();
+
+        // Corrupt one challenge coefficient after packing: set it to Q (invalid: must be < Q).
+        set_coeff_14bit_be(challenge_packed.as_mut(), 123, FALCON_Q);
+        // Padding must remain canonical.
+        assert_eq!(challenge_packed[CHALLENGE_LEN - 1], 0);
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
@@ -181,4 +183,13 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
     }
+
+    #[test]
+    fn test_falcon_core_malformed_input_returns_empty_output() {
+        let input = vec![0u8; 10];
+        let out = falcon_core(&input, 10_000).expect("should not error");
+        assert_eq!(out.gas_used, 2000);
+        assert!(out.bytes.is_empty());
+    }
+
 }

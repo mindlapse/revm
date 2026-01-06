@@ -137,7 +137,7 @@ pub(super) fn unpack_falcon_14bit_be_polynomial<const INPUT_LEN: usize>(
     // Enforce 897 bits
     if INPUT_LEN != COEFF_BYTES + 1 {
         return Err(FalconError::InvalidInputLength {
-            wanted: COEFF_BYTES, // or wanted: your chosen constant
+            wanted: COEFF_BYTES + 1,
             got: INPUT_LEN,
         });
     }
@@ -222,6 +222,10 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
         let mut acc = val;
         let mut acc_bits = COEFF_BITS as usize;
 
+        if val as u32 >= FALCON_Q as u32 {
+            return Err(FalconError::InvalidFieldElement);
+        }
+
         while acc_bits > 0 {
             let byte_pos: usize = bits_written / 8;
 
@@ -260,7 +264,7 @@ mod tests {
     use rand::Rng;
 
     use super::*;
-    use crate::falcon::utils::test::{create_sample_falcon_coefficients, sample_14bit_coeff};
+    use crate::falcon::utils::test::{create_sample_falcon_coefficients, set_coeff_14bit_be};
 
     #[test]
     fn test_require_len_ok() {
@@ -553,14 +557,15 @@ mod tests {
 
     #[test]
     fn test_unpack_falcon_14bit_be_polynomial_invalid_if_coeff_ge_12289() {
-        let mut rng = rand::rng();
-        // Repeat the test for every coefficient position, setting
-        // exactly one of them to be FALCON_Q or above.
+        // Repeat the test for every coefficient position, overwriting
+        // exactly one of them to be FALCON_Q (invalid: must be < Q).
         for i in 0..FALCON_N {
-            let mut coeffs = create_sample_falcon_coefficients();
-            coeffs[i] = sample_14bit_coeff(&mut rng, false);
+            let coeffs = create_sample_falcon_coefficients();
+            let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
 
-            let polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
+            set_coeff_14bit_be(&mut polynomial, i, FALCON_Q);
+            // Padding must remain canonical.
+            assert_eq!(polynomial[CHALLENGE_LEN - 1], 0);
 
             let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
@@ -589,6 +594,16 @@ mod tests {
             polynomial[896] = rng.random_range(1..255);
             let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
+        }
+    }
+
+    #[test]
+    fn pack_rejects_coeff_equal_q() {
+        for i in 0..FALCON_N {
+            let mut coeffs = [0u16; FALCON_N];
+            coeffs[i] = 12289;
+            let res = pack_falcon_14bit_be_polynomial(&coeffs);
+            assert!(matches!(res, Err(FalconError::InvalidFieldElement)));
         }
     }
 }

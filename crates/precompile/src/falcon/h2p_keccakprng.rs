@@ -96,4 +96,12 @@ mod tests {
         // Should not be OutOfGas, but should fail with SpecNotFinalized
         assert!(!matches!(result, Err(PrecompileError::OutOfGas)));
     }
+
+    #[test]
+    fn test_h2p_keccakprng_malformed_input_returns_empty_output() {
+        let input = vec![0u8; 10];
+        let out = h2p_keccakprng(&input, 10_000).expect("should not error");
+        assert_eq!(out.gas_used, 1000);
+        assert!(out.bytes.is_empty());
+    }
 }
