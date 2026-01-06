@@ -11,7 +11,7 @@
 /// Precompile entrypoints are expected to convert these into
 /// empty output while still charging the fixed gas cost.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum FalconError {
+pub enum FalconError {
     /// Input length does not match the expected ABI for this precompile function.
     InvalidInputLength { wanted: usize, got: usize },
 

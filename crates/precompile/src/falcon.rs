@@ -28,6 +28,7 @@ use crate::{Address, Precompile, PrecompileId};
 pub(crate) mod falcon_core;
 pub(crate) mod falcon_precompiles;
 pub(crate) use falcon_precompiles as crypto_backend;
+pub(crate) mod error;
 
 pub mod h2p_shake256;
 
@@ -35,8 +36,13 @@ pub mod h2p_shake256;
 pub mod h2p_keccakprng;
 
 mod encoding;
-mod error;
 mod utils;
+
+/// The gas cost to invoke a Falcon hash-to-point precompile
+const H2P_GAS: u64 = 1000;
+
+/// The gas cost to invoke the Falcon signature verification precompile.
+const FALCON_CORE_VERFIFY_GAS: u64 = 2000;
 
 /// Length in bytes of the message input to Falcon verification.
 ///
@@ -53,13 +59,13 @@ pub const SIG_LEN: usize = 666;
 /// used for public keys in falcon signatures, and for falcon challenge polynomials.
 pub const PACKED_POLY_LEN: usize = 897;
 
-/// Length in bytes of a Falcon-512 public key.
+/// Length in bytes of a Falcon-512 public key (packed).
 ///
 /// Public keys encode a degree-512 polynomial modulo q=12289 using
 /// a packed 14-bit-per-coefficient representation.
 pub const PK_LEN: usize = PACKED_POLY_LEN;
 
-/// Length in bytes of a packed Falcon challenge polynomial.
+/// Length in bytes of a packed Falcon challenge polynomial (packed).
 ///
 /// The challenge polynomial consists of 512 coefficients modulo q=12289,
 /// packed as 14-bit big-endian integers.
@@ -75,13 +81,30 @@ pub const S2_COMPRESSED_LEN: usize = SIG_LEN - SALT_LEN;
 const FALCON_Q: u16 = 12289;
 
 /// Falcon-512 lattice dimension (polynomial degree).
-const FALCON_N: usize = 512;
+pub const FALCON_N: usize = 512;
+
+/// Length of an (unpacked) u16 array of Falcon public key coefficients.
+pub const PK_LEN_UNPACKED: usize = FALCON_N;
+
+/// Length of an (unpacked) u16 array of Falcon challenge polynomial coefficients.
+pub const CHALLENGE_LEN_UNPACKED: usize = FALCON_N;
 
 /// Bit width used to encode Falcon coefficients (14 bits per coefficient).
 const COEFF_BITS: u32 = 14;
 
 /// Compile-time enforcement that SIG_LEN = SALT_LEN + S2_COMPRESSED_LEN
 const _: [(); SIG_LEN] = [(); SALT_LEN + S2_COMPRESSED_LEN];
+
+/// The array type for the packed representation of the coefficients of a Falcon polynomial.
+pub type PackedFalconPolynomial = [u8; PACKED_POLY_LEN];
+
+/// The unpacked form of a public key, represented as
+/// `PK_LEN_UNPACKED` coefficients in the range of [0, FALCON_Q).
+pub type UnpackedPublicKey = [u16; PK_LEN_UNPACKED];
+
+/// The unpacked form of a hash-to-point challenge, represented as
+/// `CHALLENGE_LEN_UNPACKED` coefficients in the range of [0, FALCON_Q).
+pub type UnpackedChallenge = [u16; CHALLENGE_LEN_UNPACKED];
 
 type FalconCoreInputs<'a> = (&'a [u8; SIG_LEN], &'a [u8; PK_LEN], &'a [u8; CHALLENGE_LEN]);
 type H2PInputs<'a> = (&'a [u8; MSG_LEN], &'a [u8; SIG_LEN]);

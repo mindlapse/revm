@@ -10,29 +10,33 @@
 //! provided that the signature was generated using the same H2P method.
 
 use crate::{
-    falcon::{error::FalconError, utils::map_falcon_result, H2PInputs},
+    crypto,
+    falcon::{
+        encoding::pack_falcon_14bit_be_polynomial, error::FalconError, utils::map_falcon_result,
+        H2PInputs, H2P_GAS,
+    },
     PrecompileError, PrecompileOutput, PrecompileResult,
 };
 
 pub fn h2p_keccakprng(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS: u64 = 1000;
-    if gas_limit < GAS {
+    if gas_limit < H2P_GAS {
         return Err(PrecompileError::OutOfGas);
     }
-    map_falcon_result(compute_h2p(input), GAS)
+    map_falcon_result(compute_h2p(input), H2P_GAS)
 }
 
 #[inline]
 fn compute_h2p(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
-    let (_msg, _sig) = extract_inputs_if_valid(input)?;
-    Err(FalconError::SpecNotFinalized)
+    let (msg, sig) = extract_inputs_if_valid(input)?;
+
+    let challenge = crypto().falcon_h2p_keccakprng(msg, sig)?;
+    let packed_challenge: Box<[u8]> = pack_falcon_14bit_be_polynomial(&challenge)?;
+    Ok(PrecompileOutput::new(H2P_GAS, packed_challenge.into()))
 }
 
 #[inline]
 fn extract_inputs_if_valid<'a>(input: &'a [u8]) -> Result<H2PInputs<'a>, FalconError> {
-    let h2p_inputs = crate::falcon::encoding::split_h2p_input(input)?;
-
-    Ok(h2p_inputs)
+    Ok(crate::falcon::encoding::split_h2p_input(input)?)
 }
 
 #[cfg(test)]

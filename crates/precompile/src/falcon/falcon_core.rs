@@ -6,30 +6,32 @@
 //! Hash-to-Point construction used to derive the challenge.
 
 use crate::{
+    crypto,
     falcon::{
         encoding::{self, unpack_falcon_14bit_be_polynomial},
         error::FalconError,
         utils::map_falcon_result,
-        FALCON_N,
+        FALCON_CORE_VERFIFY_GAS, FALCON_N,
     },
+    utilities::bool_to_bytes32,
     PrecompileError, PrecompileOutput, PrecompileResult,
 };
 
 /// Falcon-512 core verification precompile entrypoint.
 pub fn falcon_core(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    const GAS: u64 = 2000;
-    if gas_limit < GAS {
+    if gas_limit < FALCON_CORE_VERFIFY_GAS {
         return Err(PrecompileError::OutOfGas);
     }
-
-    map_falcon_result(verify(input), GAS)
+    map_falcon_result(verify(input), FALCON_CORE_VERFIFY_GAS)
 }
 
 #[inline]
 fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
-    let (_sig, _pk, _challenge) = extract_inputs_if_valid(input)?;
+    let (sig, pk, challenge) = extract_inputs_if_valid(input)?;
+    let valid = crypto().falcon_core_verify(sig, &pk, &challenge)?;
+    let out = valid.then(|| bool_to_bytes32(true)).unwrap_or_default();
 
-    Err(FalconError::SpecNotFinalized)
+    Ok(PrecompileOutput::new(FALCON_CORE_VERFIFY_GAS, out))
 }
 
 type SignatureBytes = [u8; 666];
@@ -134,8 +136,8 @@ mod tests {
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
         input.extend_from_slice(&sig);
-        input.extend_from_slice(&pk_packed);
-        input.extend_from_slice(&challenge_packed);
+        input.extend_from_slice(pk_packed.as_ref());
+        input.extend_from_slice(challenge_packed.as_ref());
 
         let (sig_out, pk_unpacked, challenge_unpacked) = extract_inputs_if_valid(&input).unwrap();
 
@@ -172,8 +174,8 @@ mod tests {
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
         input.extend_from_slice(&sig);
-        input.extend_from_slice(&pk_packed);
-        input.extend_from_slice(&challenge_packed);
+        input.extend_from_slice(pk_packed.as_ref());
+        input.extend_from_slice(challenge_packed.as_ref());
 
         let result = extract_inputs_if_valid(&input);
         assert!(result.is_err());

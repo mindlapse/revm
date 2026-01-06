@@ -1,6 +1,6 @@
 use crate::falcon::{
-    error::FalconError, FalconCoreInputs, H2PInputs, CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q,
-    MSG_LEN, PK_LEN, S2_COMPRESSED_LEN, SALT_LEN, SIG_LEN,
+    error::FalconError, FalconCoreInputs, H2PInputs, PackedFalconPolynomial, CHALLENGE_LEN,
+    COEFF_BITS, FALCON_N, FALCON_Q, MSG_LEN, PK_LEN, S2_COMPRESSED_LEN, SALT_LEN, SIG_LEN,
 };
 
 /// Ensures `input` is exactly `wanted` bytes long.
@@ -205,7 +205,7 @@ pub(super) fn unpack_falcon_14bit_be_polynomial<const INPUT_LEN: usize>(
 
 pub(super) fn pack_falcon_14bit_be_polynomial(
     coeffs: &[u16; FALCON_N],
-) -> Result<[u8; 897], FalconError> {
+) -> Result<Box<PackedFalconPolynomial>, FalconError> {
     const BITS_TO_WRITE: usize = FALCON_N * COEFF_BITS as usize;
     const BYTES_TO_WRITE: usize = BITS_TO_WRITE / 8;
 
@@ -213,7 +213,7 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
     const _: () = assert!(BITS_TO_WRITE % 8 == 0);
     const _: () = assert!(BYTES_TO_WRITE + 1 == CHALLENGE_LEN);
 
-    let mut out = [0u8; BYTES_TO_WRITE + 1];
+    let mut out = Box::new([0u8; BYTES_TO_WRITE + 1]);
     let out_writable = &mut out[..BYTES_TO_WRITE];
     let mut bits_written = 0;
 
