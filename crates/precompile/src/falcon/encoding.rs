@@ -121,8 +121,8 @@ pub(super) fn split_sig(
 /// - 512 coefficients × 14 bits = 7168 bits = 896 bytes of coefficient data.
 /// - If `input_len` is 897, the final byte is padding and must be 0.
 #[inline]
-pub(super) fn unpack_falcon_14bit_be_polynomial<const INPUT_LEN: usize>(
-    input: &[u8; INPUT_LEN],
+pub(super) fn unpack_falcon_14bit_be_polynomial(
+    input: &PackedFalconPolynomial,
 ) -> Result<[u16; FALCON_N], FalconError> {
     // You can use this helper for both public key and challenge bits without duplicating logic.
 
@@ -133,14 +133,6 @@ pub(super) fn unpack_falcon_14bit_be_polynomial<const INPUT_LEN: usize>(
     // Compile-time invariants
     const _: () = assert!((FALCON_N * (COEFF_BITS as usize)) % 8 == 0);
     const _: () = assert!(COEFF_BYTES == 896);
-
-    // Enforce 897 bits
-    if INPUT_LEN != COEFF_BYTES + 1 {
-        return Err(FalconError::InvalidInputLength {
-            wanted: COEFF_BYTES + 1,
-            got: INPUT_LEN,
-        });
-    }
 
     // If there is a padding byte, require it to be zero for canonical encoding.
     if input[COEFF_BYTES] != 0 {
@@ -550,7 +542,7 @@ mod tests {
         // 512 coefficients × 14 bits = 896 bytes, plus 1 padding byte = 897 total.
         let input = [0u8; CHALLENGE_LEN];
 
-        let poly = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&input).unwrap();
+        let poly = unpack_falcon_14bit_be_polynomial(&input).unwrap();
 
         assert_eq!(poly, [0u16; FALCON_N]);
     }
@@ -567,7 +559,7 @@ mod tests {
             // Padding must remain canonical.
             assert_eq!(polynomial[CHALLENGE_LEN - 1], 0);
 
-            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
         }
     }
@@ -579,7 +571,7 @@ mod tests {
             let coeffs = create_sample_falcon_coefficients();
             let polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
 
-            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), coeffs);
         }
@@ -592,7 +584,7 @@ mod tests {
             let coeffs = create_sample_falcon_coefficients();
             let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
             polynomial[896] = rng.random_range(1..255);
-            let result = unpack_falcon_14bit_be_polynomial::<CHALLENGE_LEN>(&polynomial);
+            let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
         }
     }

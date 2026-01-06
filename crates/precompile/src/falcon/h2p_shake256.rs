@@ -94,8 +94,11 @@ mod tests {
         let input = vec![0u8; 10];
         let gas_limit = 10_000;
         let result = h2p_shake256(&input, gas_limit);
-        // Should not be OutOfGas, but should fail with SpecNotFinalized
-        assert!(!matches!(result, Err(PrecompileError::OutOfGas)));
+
+        assert!(result.is_ok());
+        let out = result.unwrap();
+        assert!(out.gas_used == H2P_GAS);
+        assert!(out.bytes.is_empty());
     }
 
     #[test]

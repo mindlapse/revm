@@ -42,7 +42,7 @@ mod utils;
 const H2P_GAS: u64 = 1000;
 
 /// The gas cost to invoke the Falcon signature verification precompile.
-const FALCON_CORE_VERFIFY_GAS: u64 = 2000;
+const FALCON_CORE_VERIFY_GAS: u64 = 2000;
 
 /// Length in bytes of the message input to Falcon verification.
 ///

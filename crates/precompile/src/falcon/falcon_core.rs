@@ -11,7 +11,7 @@ use crate::{
         encoding::{self, unpack_falcon_14bit_be_polynomial},
         error::FalconError,
         utils::map_falcon_result,
-        FALCON_CORE_VERFIFY_GAS, FALCON_N,
+        FALCON_CORE_VERIFY_GAS, FALCON_N,
     },
     utilities::bool_to_bytes32,
     PrecompileError, PrecompileOutput, PrecompileResult,
@@ -19,10 +19,10 @@ use crate::{
 
 /// Falcon-512 core verification precompile entrypoint.
 pub fn falcon_core(input: &[u8], gas_limit: u64) -> PrecompileResult {
-    if gas_limit < FALCON_CORE_VERFIFY_GAS {
+    if gas_limit < FALCON_CORE_VERIFY_GAS {
         return Err(PrecompileError::OutOfGas);
     }
-    map_falcon_result(verify(input), FALCON_CORE_VERFIFY_GAS)
+    map_falcon_result(verify(input), FALCON_CORE_VERIFY_GAS)
 }
 
 #[inline]
@@ -31,7 +31,7 @@ fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
     let valid = crypto().falcon_core_verify(sig, &pk, &challenge)?;
     let out = valid.then(|| bool_to_bytes32(true)).unwrap_or_default();
 
-    Ok(PrecompileOutput::new(FALCON_CORE_VERFIFY_GAS, out))
+    Ok(PrecompileOutput::new(FALCON_CORE_VERIFY_GAS, out))
 }
 
 type SignatureBytes = [u8; 666];
@@ -107,8 +107,11 @@ mod tests {
         let input = vec![0u8; 10];
         let gas_limit = 10_000;
         let result = falcon_core(&input, gas_limit);
-        // Should not be OutOfGas, but should fail with SpecNotFinalized
-        assert!(!matches!(result, Err(PrecompileError::OutOfGas)));
+
+        assert!(result.is_ok());
+        let out = result.unwrap();
+        assert!(out.gas_used == FALCON_CORE_VERIFY_GAS);
+        assert!(out.bytes.is_empty());
     }
 
     #[test]
