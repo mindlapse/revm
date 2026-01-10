@@ -11,7 +11,7 @@ use crate::{
         encoding::{self, unpack_falcon_14bit_be_polynomial},
         error::FalconError,
         utils::map_falcon_result,
-        FALCON_CORE_VERIFY_GAS, FALCON_N,
+        FALCON_CORE_VERIFY_GAS, FALCON_N, S2_COMPRESSED_LEN,
     },
     utilities::bool_to_bytes32,
     PrecompileError, PrecompileOutput, PrecompileResult,
@@ -27,27 +27,28 @@ pub fn falcon_core(input: &[u8], gas_limit: u64) -> PrecompileResult {
 
 #[inline]
 fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
-    let (sig, pk, challenge) = extract_inputs_if_valid(input)?;
-    let valid = crypto().falcon_core_verify(sig, &pk, &challenge)?;
+    let (s2_compressed, pk, challenge) = extract_inputs_if_valid(input)?;
+    let valid = crypto().falcon_core_verify(s2_compressed, &pk, &challenge)?;
     let out = valid.then(|| bool_to_bytes32(true)).unwrap_or_default();
 
     Ok(PrecompileOutput::new(FALCON_CORE_VERIFY_GAS, out))
 }
 
-type SignatureBytes = [u8; 666];
+type S2CompressedBytes = [u8; S2_COMPRESSED_LEN];
 type UnpackedPk = [u16; FALCON_N];
 type UnpackedChallenge = [u16; FALCON_N];
 
 #[inline]
 fn extract_inputs_if_valid<'a>(
     input: &'a [u8],
-) -> Result<(&'a SignatureBytes, UnpackedPk, UnpackedChallenge), FalconError> {
+) -> Result<(&'a S2CompressedBytes, UnpackedPk, UnpackedChallenge), FalconError> {
     let (sig, pk, challenge) = encoding::split_falcon_core_input(input)?;
+    let (_salt, s2_compressed) = encoding::split_sig(sig)?;
 
     let pk_unpacked = unpack_falcon_14bit_be_polynomial(pk)?;
     let challenge_unpacked = unpack_falcon_14bit_be_polynomial(challenge)?;
 
-    Ok((sig, pk_unpacked, challenge_unpacked))
+    Ok((s2_compressed, pk_unpacked, challenge_unpacked))
 }
 
 #[cfg(test)]
@@ -55,7 +56,7 @@ mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
     use crate::falcon::utils::test::{sample_14bit_coeff, set_coeff_14bit_be};
-    use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, SIG_LEN};
+    use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, S2_COMPRESSED_LEN, SIG_LEN};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -78,7 +79,7 @@ mod tests {
     fn test_extract_inputs_if_valid_with_too_long_input() {
         // Input longer than expected
         let mut input = Vec::new();
-        input.extend(vec![1u8; SIG_LEN]);
+        input.extend(vec![1u8; S2_COMPRESSED_LEN]);
         input.extend(vec![2u8; PK_LEN]);
         input.extend(vec![3u8; CHALLENGE_LEN]);
         input.extend(vec![4u8; 5]); // Extra bytes
@@ -144,7 +145,7 @@ mod tests {
 
         let (sig_out, pk_unpacked, challenge_unpacked) = extract_inputs_if_valid(&input).unwrap();
 
-        assert_eq!(sig_out, &sig);
+        assert_eq!(sig_out, encoding::split_sig(&sig).unwrap().1);
         assert_eq!(pk_unpacked, pk_coeffs);
         assert_eq!(challenge_unpacked, challenge_coeffs);
     }
@@ -194,5 +195,4 @@ mod tests {
         assert_eq!(out.gas_used, 2000);
         assert!(out.bytes.is_empty());
     }
-
 }

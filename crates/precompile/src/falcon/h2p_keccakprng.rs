@@ -12,7 +12,9 @@
 use crate::{
     crypto,
     falcon::{
-        encoding::pack_falcon_14bit_be_polynomial, error::FalconError, utils::map_falcon_result,
+        encoding::{pack_falcon_14bit_be_polynomial, split_sig},
+        error::FalconError,
+        utils::map_falcon_result,
         H2PInputs, H2P_GAS,
     },
     PrecompileError, PrecompileOutput, PrecompileResult,
@@ -28,8 +30,8 @@ pub fn h2p_keccakprng(input: &[u8], gas_limit: u64) -> PrecompileResult {
 #[inline]
 fn compute_h2p(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
     let (msg, sig) = extract_inputs_if_valid(input)?;
-
-    let challenge = crypto().falcon_h2p_keccakprng(msg, sig)?;
+    let (salt, _s2_compressed_sig) = split_sig(sig)?;
+    let challenge = crypto().falcon_h2p_keccakprng(msg, salt)?;
     let packed_challenge: Box<[u8]> = pack_falcon_14bit_be_polynomial(&challenge)?;
     Ok(PrecompileOutput::new(H2P_GAS, packed_challenge.into()))
 }

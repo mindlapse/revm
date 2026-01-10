@@ -7,7 +7,9 @@ use std::{borrow::Cow, boxed::Box, string::String, vec::Vec};
 use crate::bls12_381::{G1Point, G1PointScalar, G2Point, G2PointScalar};
 
 #[cfg(feature = "falcon")]
-use crate::falcon::{error::FalconError, UnpackedChallenge, UnpackedPublicKey, MSG_LEN, SIG_LEN};
+use crate::falcon::{
+    error::FalconError, UnpackedChallenge, UnpackedPublicKey, MSG_LEN, S2_COMPRESSED_LEN, SALT_LEN,
+};
 
 /// Global crypto provider instance
 static CRYPTO: OnceLock<Box<dyn Crypto>> = OnceLock::new();
@@ -198,36 +200,36 @@ pub trait Crypto: Send + Sync + Debug {
         crate::bls12_381::crypto_backend::map_fp2_to_g2_bytes(&fp2.0, &fp2.1)
     }
 
-    /// Falcon hash-to-point using SHAKE256 (XOF) as specified by the Falcon scheme.
+    /// Falcon hash-to-point using SHAKE256 (XOF), as used by Falcon-512 verification.
     ///
-    /// Derives the packed challenge polynomial from `(salt || m)`, where `salt` is
-    /// extracted from the raw signature encoding `sig` and `m` is the 32-byte hash
-    /// from the message used to create the signature.
+    /// Computes the challenge polynomial `c` from `salt || msg_digest`, where:
+    /// - `salt` is the 40-byte random value carried in the signature, and
+    /// - `msg_digest` is the 32-byte message representative provided to the precompile.
     ///
-    /// The challenge polynomial is comprised of 512 coefficients, each in the range [0,12289).
-    /// Note: sig` is used only for salt extraction; no cryptographic verification is performed.
+    /// Returns the challenge as 512 coefficients with each coefficient in the range `[0, FALCON_Q)`),
+    /// suitable for packing into the 897-byte canonical encoding.
     #[cfg(feature = "falcon")]
     fn falcon_h2p_shake256(
         &self,
-        _m: &[u8; MSG_LEN],
-        _sig: &[u8; SIG_LEN],
+        _msg_digest: &[u8; MSG_LEN],
+        _salt: &[u8; SALT_LEN],
     ) -> Result<UnpackedChallenge, FalconError> {
         Err(FalconError::SpecNotFinalized)
     }
 
-    /// Falcon hash-to-point using Keccak-PRNG as specified by the Falcon scheme.
+    /// Falcon hash-to-point using Keccak-PRNG, as used by Falcon-512 verification.
     ///
-    /// Derives the packed challenge polynomial from `(salt || m)`, where `salt` is
-    /// extracted from the raw signature encoding `sig` and `m` is the 32-byte hash
-    /// from the message used to create the signature.
+    /// Computes the challenge polynomial `c` from `salt || msg_digest`, where:
+    /// - `salt` is the 40-byte random value carried in the signature, and
+    /// - `msg_digest` is the 32-byte message representative provided to the precompile.
     ///
-    /// The challenge polynomial is comprised of 512 coefficients, each in the range [0,12289).
-    /// Note: sig` is used only for salt extraction; no cryptographic verification is performed.
+    /// Returns the challenge as 512 coefficients with each coefficient in the range `[0, FALCON_Q)`),
+    /// suitable for packing into the 897-byte canonical encoding.
     #[cfg(feature = "falcon-keccakprng")]
     fn falcon_h2p_keccakprng(
         &self,
-        _m: &[u8; MSG_LEN],
-        _sig: &[u8; SIG_LEN],
+        _msg_digest: &[u8; MSG_LEN],
+        _salt: &[u8; SALT_LEN],
     ) -> Result<UnpackedChallenge, FalconError> {
         Err(FalconError::SpecNotFinalized)
     }
@@ -246,7 +248,7 @@ pub trait Crypto: Send + Sync + Debug {
     #[cfg(feature = "falcon")]
     fn falcon_core_verify(
         &self,
-        _sig: &[u8; SIG_LEN],
+        _s2: &[u8; S2_COMPRESSED_LEN],
         _pk: &UnpackedPublicKey,
         _challenge: &UnpackedChallenge,
     ) -> Result<bool, FalconError> {
