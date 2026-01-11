@@ -157,24 +157,128 @@ pub struct FalconPrecompiles {
 ///
 /// This design keeps Falcon support opt-in while EIP-8052 is still
 /// under active discussion and address allocation is not finalized.
-pub fn precompiles_with_addresses(addrs: FalconAddresses) -> FalconPrecompiles {
-    FalconPrecompiles {
-        h2p_shake256: Precompile::new(
-            PrecompileId::FalconHashToPointShake256,
-            addrs.h2p_shake256,
-            h2p_shake256::h2p_shake256,
-        ),
-        falcon_core: Precompile::new(
+pub fn precompiles_with_addresses(addrs: FalconAddresses) -> Vec<Precompile> {
+    vec![
+        Precompile::new(
             PrecompileId::FalconCore,
             addrs.falcon_core,
             falcon_core::falcon_core,
         ),
-
+        Precompile::new(
+            PrecompileId::FalconHashToPointShake256,
+            addrs.h2p_shake256,
+            h2p_shake256::h2p_shake256,
+        ),
         #[cfg(feature = "falcon-keccakprng")]
-        h2p_keccakprng: Precompile::new(
+        Precompile::new(
             PrecompileId::FalconHashToPointKeccakPrng,
             addrs.h2p_keccakprng,
             h2p_keccakprng::h2p_keccakprng,
         ),
+    ]
+}
+
+/// Unit tests for the Falcon precompile plumbing and basic input/gas checks.
+///
+/// These tests verify the runtime registration and minimal safety behavior of the
+/// Falcon-related precompiles provided by this crate. They do not exercise the
+/// cryptographic core; instead they validate:
+///
+/// - That precompiles can be registered at explicit addresses via
+///   `precompiles_with_addresses` and integrated into a `Precompiles` set.
+/// - Correct fixed-base gas charging and OutOfGas reporting when invoked with
+///   insufficient gas.
+/// - That invalid-length inputs yield no output but still consume the fixed
+///   base gas amount.
+///
+/// The module provides small helpers used across tests:
+/// - `precompiles()` builds a `Precompiles` set containing the Falcon entries.
+/// - `exec(addr, input, gas)` executes the precompile at `addr` with the given
+///   input and gas and returns the `PrecompileResult`.
+///
+/// Tests for the Keccak-PRNG-based Hash-to-Point precompile are conditioned on
+/// the `falcon-keccakprng` feature and are only compiled when that feature is enabled.
+#[cfg(test)]
+mod tests {
+
+    use primitives::Address;
+
+    use crate::{
+        falcon::{self, FALCON_CORE_VERIFY_GAS, H2P_GAS},
+        PrecompileError, Precompiles,
+    };
+
+    const FALCON_CORE_ADDR: Address = crate::u64_to_address(0xF8052_000); // TODO finalize actual precompile address
+    const H2P_SHAKE256_ADDR: Address = crate::u64_to_address(0xF8052_001); // TODO finalize actual precompile address
+    const H2P_KECCAKPRNG_ADDR: Address = crate::u64_to_address(0xF8052_002); // TODO finalize actual precompile address
+
+    fn precompiles() -> crate::Precompiles {
+        let addrs = falcon::FalconAddresses {
+            falcon_core: FALCON_CORE_ADDR,
+            h2p_shake256: H2P_SHAKE256_ADDR,
+            #[cfg(feature = "falcon-keccakprng")]
+            h2p_keccakprng: H2P_KECCAKPRNG_ADDR,
+        };
+
+        let mut precompiles = Precompiles::osaka().clone();
+        precompiles.extend(falcon::precompiles_with_addresses(addrs));
+        precompiles
+    }
+
+    fn exec(addr: Address, input: &[u8], gas: u64) -> crate::PrecompileResult {
+        precompiles()
+            .get(&addr)
+            .expect("registered")
+            .execute(input, gas)
+    }
+
+    #[test]
+    fn falcon_precompiles_are_registered() {
+        let pcs = precompiles();
+        assert!(pcs.contains(&H2P_SHAKE256_ADDR));
+        assert!(pcs.contains(&FALCON_CORE_ADDR));
+        #[cfg(feature = "falcon-keccakprng")]
+        assert!(pcs.contains(&H2P_KECCAKPRNG_ADDR));
+    }
+
+    #[test]
+    fn h2p_shake256_oog_when_gas_below_fixed_cost() {
+        let err = exec(H2P_SHAKE256_ADDR, &[], H2P_GAS - 1).unwrap_err();
+        assert!(matches!(err, PrecompileError::OutOfGas));
+    }
+
+    #[test]
+    fn h2p_shake256_invalid_length_is_empty_output_and_charges_fixed_cost() {
+        let out = exec(H2P_SHAKE256_ADDR, &[], H2P_GAS).unwrap();
+        assert_eq!(out.gas_used, H2P_GAS);
+        assert!(out.bytes.is_empty());
+    }
+
+    #[cfg(feature = "falcon-keccakprng")]
+    #[test]
+    fn h2p_keccakprng_oog_when_gas_below_fixed_cost() {
+        let err = exec(H2P_KECCAKPRNG_ADDR, &[], H2P_GAS - 1).unwrap_err();
+        assert!(matches!(err, PrecompileError::OutOfGas));
+    }
+
+    #[cfg(feature = "falcon-keccakprng")]
+    #[test]
+    fn h2p_keccakprng_invalid_length_is_empty_output_and_charges_fixed_cost() {
+        let out = exec(H2P_KECCAKPRNG_ADDR, &[], H2P_GAS).unwrap();
+        assert_eq!(out.gas_used, H2P_GAS);
+        assert!(out.bytes.is_empty());
+    }
+
+    #[test]
+    fn falcon_core_oog_when_gas_below_fixed_cost() {
+        let err = exec(FALCON_CORE_ADDR, &[], FALCON_CORE_VERIFY_GAS - 1).unwrap_err();
+        assert!(matches!(err, PrecompileError::OutOfGas));
+    }
+
+    #[test]
+    fn falcon_core_invalid_length_is_empty_output_and_charges_fixed_cost() {
+        let out = exec(FALCON_CORE_ADDR, &[], FALCON_CORE_VERIFY_GAS).unwrap();
+        assert_eq!(out.gas_used, FALCON_CORE_VERIFY_GAS);
+        assert!(out.bytes.is_empty());
     }
 }
