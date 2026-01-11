@@ -22,6 +22,14 @@ pub(super) fn map_falcon_result(
     }
 }
 
+#[inline]
+pub(super) fn read_u16_be(r: &mut impl sha3::digest::XofReader) -> u16 {
+    let mut buf = [0u8; 2];
+    r.read(&mut buf);
+    u16::from_be_bytes(buf)
+}
+
+
 #[cfg(test)]
 pub(in crate::falcon) mod test {
     use crate::falcon::{CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q};

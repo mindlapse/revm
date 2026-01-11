@@ -11,7 +11,7 @@
 
 use crate::{
     PrecompileError, PrecompileOutput, PrecompileResult, crypto, falcon::{
-        H2P_GAS, H2PInputs, MSG_LEN, SALT_LEN, encoding::{pack_falcon_14bit_be_polynomial, split_sig}, error::FalconError, utils::map_falcon_result
+        FALCON_Q, H2P_GAS, H2PInputs, MSG_LEN, SALT_LEN, UnpackedChallenge, encoding::{pack_falcon_14bit_be_polynomial, split_sig}, error::FalconError, utils::{map_falcon_result, read_u16_be}
     }
 };
 use sha3 as _;
@@ -22,6 +22,21 @@ pub fn h2p_shake256(input: &[u8], gas_limit: u64) -> PrecompileResult {
     }
     map_falcon_result(compute_h2p(input), H2P_GAS)
 }
+
+#[inline]
+fn compute_h2p(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
+    let (msg, sig) = extract_inputs_if_valid(input)?;
+    let (salt, _) = split_sig(sig)?;
+    let challenge = crypto().falcon_h2p_shake256(msg, salt)?;
+    let packed_challenge: Box<[u8]> = pack_falcon_14bit_be_polynomial(&challenge)?;
+    Ok(PrecompileOutput::new(H2P_GAS, packed_challenge.into()))
+}
+
+#[inline]
+fn extract_inputs_if_valid<'a>(input: &'a [u8]) -> Result<H2PInputs<'a>, FalconError> {
+    Ok(crate::falcon::encoding::split_h2p_input(input)?)
+}
+
 
 #[inline]
 pub(crate) fn shake256_reader(
@@ -40,17 +55,42 @@ pub(crate) fn shake256_reader(
 }
 
 #[inline]
-fn compute_h2p(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
-    let (msg, sig) = extract_inputs_if_valid(input)?;
-    let (salt, _) = split_sig(sig)?;
-    let challenge = crypto().falcon_h2p_shake256(msg, salt)?;
-    let packed_challenge: Box<[u8]> = pack_falcon_14bit_be_polynomial(&challenge)?;
-    Ok(PrecompileOutput::new(H2P_GAS, packed_challenge.into()))
+pub(crate) fn falcon_h2p_shake256(
+    salt: &[u8; SALT_LEN],
+    msg_digest: &[u8; MSG_LEN],
+) -> Result<UnpackedChallenge, FalconError> {
+    let mut r = shake256_reader(salt, msg_digest);
+    falcon_h2p_with_next_u16(|| read_u16_be(&mut r))
 }
 
 #[inline]
-fn extract_inputs_if_valid<'a>(input: &'a [u8]) -> Result<H2PInputs<'a>, FalconError> {
-    Ok(crate::falcon::encoding::split_h2p_input(input)?)
+fn falcon_h2p_with_next_u16<F>(mut next_u16: F) -> Result<UnpackedChallenge, FalconError>
+where
+    F: FnMut() -> u16,
+{
+    const ACCEPT_MAX: u16 = FALCON_Q * 5;
+    const MAX_TRIES_PER_COEFF: usize = 35;
+
+    let mut out = [0u16; crate::falcon::FALCON_N];
+
+    for i in 0..crate::falcon::FALCON_N {
+        let mut tries = 0usize;
+
+        loop {
+            if tries == MAX_TRIES_PER_COEFF {
+                return Err(FalconError::RejectionSamplingLimit { tries: MAX_TRIES_PER_COEFF });
+            }
+            tries += 1;
+
+            let t = next_u16();
+            if t < ACCEPT_MAX {
+                out[i] = t % FALCON_Q;
+                break;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -228,4 +268,45 @@ mod tests {
 
         assert_ne!(a, swapped);
     }
+
+    #[test]
+    fn h2p_rejection_sampling_limit_trips_fast() {
+        let res = falcon_h2p_with_next_u16(|| 0xFFFF);
+        assert!(matches!(res, Err(FalconError::RejectionSamplingLimit { tries: 35 })));
+    }
+
+    #[test]
+    fn h2p_accepts_just_below_accept_max_and_rejects_at_accept_max() {
+        const ACCEPT_MAX: u16 = FALCON_Q * 5;
+
+        let mut step = 0usize;
+        let out = falcon_h2p_with_next_u16(|| {
+            step += 1;
+            match step {
+                1 => ACCEPT_MAX,     // rejected
+                2 => ACCEPT_MAX - 1, // accepted
+                _ => 0,              // accepted
+            }
+        })
+        .unwrap();
+
+        assert_eq!(out[0], (ACCEPT_MAX - 1) % FALCON_Q);
+    }
+
+    #[test]
+    fn h2p_mod_reduction_behaves_as_expected_on_known_values() {
+        let mut calls = 0usize;
+        let out = falcon_h2p_with_next_u16(|| {
+            calls += 1;
+            match calls {
+                1 => FALCON_Q + 1, // accepted, should reduce to 1
+                _ => 0,
+            }
+        })
+        .unwrap();
+
+        assert_eq!(out[0], 1);
+    }
+
+    
 }

@@ -211,10 +211,10 @@ pub trait Crypto: Send + Sync + Debug {
     #[cfg(feature = "falcon")]
     fn falcon_h2p_shake256(
         &self,
-        _msg_digest: &[u8; MSG_LEN],
-        _salt: &[u8; SALT_LEN],
+        msg_digest: &[u8; MSG_LEN],
+        salt: &[u8; SALT_LEN],
     ) -> Result<UnpackedChallenge, FalconError> {
-        Err(FalconError::SpecNotFinalized)
+        crate::falcon::crypto_backend::falcon_h2p_shake256(salt, msg_digest)
     }
 
     /// Falcon hash-to-point using Keccak-PRNG, as used by Falcon-512 verification.
