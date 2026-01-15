@@ -21,11 +21,14 @@ pub enum FalconError {
     /// Encountered a non-canonical or otherwise invalid field element encoding.
     InvalidFieldElement,
 
+    /// Invalid signature encoding
+    InvalidSignatureEncoding,
+
     /// Behavior depends on a spec feature gate that is disabled / not finalized.
     SpecNotFinalized,
 
     /// Sampling a usable coefficient failed after N tries.
-    RejectionSamplingLimit { tries: usize }
+    RejectionSamplingLimit { tries: usize },
 }
 
 #[cfg(feature = "std")]
@@ -45,8 +48,13 @@ mod std_impls {
                     )
                 }
                 FalconError::InvalidFieldElement => write!(f, "falcon: invalid field element"),
+                FalconError::InvalidSignatureEncoding => {
+                    write!(f, "falcon: invalid signature encoding")
+                }
                 FalconError::SpecNotFinalized => write!(f, "falcon: spec not finalized"),
-                FalconError::RejectionSamplingLimit { tries } => write!(f, "falcon: sampling failed after {tries} tries"),
+                FalconError::RejectionSamplingLimit { tries } => {
+                    write!(f, "falcon: sampling failed after {tries} tries")
+                }
             }
         }
     }

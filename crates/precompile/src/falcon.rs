@@ -36,6 +36,7 @@ pub mod h2p_shake256;
 pub mod h2p_keccakprng;
 
 mod encoding;
+mod sig_reader;
 mod utils;
 
 /// The gas cost to invoke a Falcon hash-to-point precompile
@@ -89,6 +90,9 @@ pub const PK_LEN_UNPACKED: usize = FALCON_N;
 /// Length of an (unpacked) u16 array of Falcon challenge polynomial coefficients.
 pub const CHALLENGE_LEN_UNPACKED: usize = FALCON_N;
 
+/// Length of an (unpacked) i32 array of Falcon signature polynomial coefficients.
+pub const SIGNATURE_LEN_UNPACKED: usize = FALCON_N;
+
 /// Bit width used to encode Falcon coefficients (14 bits per coefficient).
 const COEFF_BITS: u32 = 14;
 
@@ -97,6 +101,9 @@ const _: [(); SIG_LEN] = [(); SALT_LEN + S2_COMPRESSED_LEN];
 
 /// The array type for the packed representation of the coefficients of a Falcon polynomial.
 pub type PackedFalconPolynomial = [u8; PACKED_POLY_LEN];
+
+/// The unpacked form of the signature, as 512 i32 coefficients.
+pub type UnpackedSignature = [i32; SIGNATURE_LEN_UNPACKED];
 
 /// The unpacked form of a public key, represented as
 /// `PK_LEN_UNPACKED` coefficients in the range of [0, FALCON_Q).

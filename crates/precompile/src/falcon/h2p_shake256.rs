@@ -10,9 +10,14 @@
 //! provided that the signature was generated using the same H2P method.
 
 use crate::{
-    PrecompileError, PrecompileOutput, PrecompileResult, crypto, falcon::{
-        FALCON_Q, H2P_GAS, H2PInputs, MSG_LEN, SALT_LEN, UnpackedChallenge, encoding::{pack_falcon_14bit_be_polynomial, split_sig}, error::FalconError, utils::{map_falcon_result, read_u16_be}
-    }
+    crypto,
+    falcon::{
+        encoding::{pack_falcon_14bit_be_polynomial, split_sig},
+        error::FalconError,
+        utils::{map_falcon_result, read_u16_be},
+        H2PInputs, UnpackedChallenge, FALCON_Q, H2P_GAS, MSG_LEN, SALT_LEN,
+    },
+    PrecompileError, PrecompileOutput, PrecompileResult,
 };
 use sha3 as _;
 
@@ -37,15 +42,14 @@ fn extract_inputs_if_valid<'a>(input: &'a [u8]) -> Result<H2PInputs<'a>, FalconE
     Ok(crate::falcon::encoding::split_h2p_input(input)?)
 }
 
-
 #[inline]
 pub(crate) fn shake256_reader(
     salt: &[u8; SALT_LEN],
     msg_digest: &[u8; MSG_LEN],
 ) -> impl sha3::digest::XofReader {
     use sha3::{
+        digest::{ExtendableOutput, Update},
         Shake256,
-        digest::{Update, ExtendableOutput},
     };
 
     let mut h = Shake256::default();
@@ -78,7 +82,9 @@ where
 
         loop {
             if tries == MAX_TRIES_PER_COEFF {
-                return Err(FalconError::RejectionSamplingLimit { tries: MAX_TRIES_PER_COEFF });
+                return Err(FalconError::RejectionSamplingLimit {
+                    tries: MAX_TRIES_PER_COEFF,
+                });
             }
             tries += 1;
 
@@ -252,7 +258,10 @@ mod tests {
 
     #[test]
     fn shake256_reader_absorb_order_matters() {
-        use sha3::{Shake256, digest::{Update, ExtendableOutput}};
+        use sha3::{
+            digest::{ExtendableOutput, Update},
+            Shake256,
+        };
 
         let salt = [8u8; SALT_LEN];
         let msg = [9u8; MSG_LEN];
@@ -272,7 +281,10 @@ mod tests {
     #[test]
     fn h2p_rejection_sampling_limit_trips_fast() {
         let res = falcon_h2p_with_next_u16(|| 0xFFFF);
-        assert!(matches!(res, Err(FalconError::RejectionSamplingLimit { tries: 35 })));
+        assert!(matches!(
+            res,
+            Err(FalconError::RejectionSamplingLimit { tries: 35 })
+        ));
     }
 
     #[test]
@@ -307,6 +319,4 @@ mod tests {
 
         assert_eq!(out[0], 1);
     }
-
-    
 }

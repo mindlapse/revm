@@ -29,7 +29,6 @@ pub(super) fn read_u16_be(r: &mut impl sha3::digest::XofReader) -> u16 {
     u16::from_be_bytes(buf)
 }
 
-
 #[cfg(test)]
 pub(in crate::falcon) mod test {
     use crate::falcon::{CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q};
@@ -38,6 +37,61 @@ pub(in crate::falcon) mod test {
 
     fn dummy_output(gas: u64, data: &[u8]) -> PrecompileOutput {
         PrecompileOutput::new(gas, Bytes::copy_from_slice(data))
+    }
+
+    /// Push one bit into a growing MSB-first bit vector.
+    pub(in crate::falcon) fn push_bit(bits: &mut Vec<u8>, b: bool) {
+        bits.push(if b { 1 } else { 0 });
+    }
+
+    /// Push `nbits` from `value`, MSB-first.
+    pub(in crate::falcon) fn push_bits_msb(bits: &mut Vec<u8>, value: u32, nbits: usize) {
+        for i in (0..nbits).rev() {
+            push_bit(bits, ((value >> i) & 1) != 0);
+        }
+    }
+
+    /// Unary encode k as 0^k 1
+    pub(in crate::falcon) fn push_unary(bits: &mut Vec<u8>, k: usize) {
+        for _ in 0..k {
+            push_bit(bits, false);
+        }
+        push_bit(bits, true);
+    }
+
+    /// Encode one coefficient per Falcon compression rules:
+    /// sign bit, then 7 low bits of abs, then unary of (abs >> 7).
+    pub(in crate::falcon) fn push_coeff(bits: &mut Vec<u8>, coeff: i32) {
+        let neg = coeff < 0;
+        let abs = coeff.unsigned_abs(); // u32
+
+        // sign
+        push_bit(bits, neg);
+
+        // low 7 bits of abs
+        let low7 = (abs & 0x7F) as u32;
+        push_bits_msb(bits, low7, 7);
+
+        // unary tail for high bits
+        let k = (abs >> 7) as usize;
+        push_unary(bits, k);
+    }
+
+    /// Convert MSB-first bit vector into a zero-padded `[u8; N]`.
+    pub(in crate::falcon) fn bits_to_buf<const N: usize>(bits: &[u8]) -> [u8; N] {
+        let mut buf = [0u8; N];
+        let total_bits = N * 8;
+
+        // Write as many bits as fit; any remaining are left as 0 (padding).
+        let n = bits.len().min(total_bits);
+        for i in 0..n {
+            let byte_pos = i >> 3;
+            let bit_in_byte = i & 7; // 0 = MSB
+            if bits[i] != 0 {
+                buf[byte_pos] |= 1u8 << (7 - bit_in_byte);
+            }
+        }
+        buf
     }
 
     #[test]

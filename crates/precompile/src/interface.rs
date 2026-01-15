@@ -8,7 +8,7 @@ use crate::bls12_381::{G1Point, G1PointScalar, G2Point, G2PointScalar};
 
 #[cfg(feature = "falcon")]
 use crate::falcon::{
-    error::FalconError, UnpackedChallenge, UnpackedPublicKey, MSG_LEN, S2_COMPRESSED_LEN, SALT_LEN,
+    error::FalconError, UnpackedChallenge, UnpackedPublicKey, UnpackedSignature, MSG_LEN, SALT_LEN,
 };
 
 /// Global crypto provider instance
@@ -248,11 +248,11 @@ pub trait Crypto: Send + Sync + Debug {
     #[cfg(feature = "falcon")]
     fn falcon_core_verify(
         &self,
-        _s2: &[u8; S2_COMPRESSED_LEN],
-        _pk: &UnpackedPublicKey,
-        _challenge: &UnpackedChallenge,
+        sig: &UnpackedSignature,
+        pk: &UnpackedPublicKey,
+        challenge: &UnpackedChallenge,
     ) -> Result<bool, FalconError> {
-        Err(FalconError::SpecNotFinalized)
+        crate::falcon::crypto_backend::falcon_core_verify(sig, pk, challenge)
     }
 }
 

@@ -10,8 +10,9 @@ use crate::{
     falcon::{
         encoding::{self, unpack_falcon_14bit_be_polynomial},
         error::FalconError,
+        sig_reader::SigReader,
         utils::map_falcon_result,
-        FALCON_CORE_VERIFY_GAS, FALCON_N, S2_COMPRESSED_LEN,
+        UnpackedPublicKey, UnpackedSignature, FALCON_CORE_VERIFY_GAS, FALCON_N,
     },
     utilities::bool_to_bytes32,
     PrecompileError, PrecompileOutput, PrecompileResult,
@@ -27,35 +28,48 @@ pub fn falcon_core(input: &[u8], gas_limit: u64) -> PrecompileResult {
 
 #[inline]
 fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
-    let (s2_compressed, pk, challenge) = extract_inputs_if_valid(input)?;
-    let valid = crypto().falcon_core_verify(s2_compressed, &pk, &challenge)?;
+    let (sig_coefficients, pk, challenge) = extract_inputs_if_valid(input)?;
+    let valid = crypto().falcon_core_verify(&sig_coefficients, &pk, &challenge)?;
     let out = valid.then(|| bool_to_bytes32(true)).unwrap_or_default();
 
     Ok(PrecompileOutput::new(FALCON_CORE_VERIFY_GAS, out))
 }
 
-type S2CompressedBytes = [u8; S2_COMPRESSED_LEN];
+pub(crate) fn falcon_core_verify(
+    _sig: &UnpackedSignature,
+    _pk: &UnpackedPublicKey,
+    _challenge: &UnpackedChallenge,
+) -> Result<bool, FalconError> {
+    Ok(true) // TODO
+}
+
+type UnpackedSig = [i32; FALCON_N];
 type UnpackedPk = [u16; FALCON_N];
 type UnpackedChallenge = [u16; FALCON_N];
 
 #[inline]
 fn extract_inputs_if_valid<'a>(
     input: &'a [u8],
-) -> Result<(&'a S2CompressedBytes, UnpackedPk, UnpackedChallenge), FalconError> {
+) -> Result<(UnpackedSig, UnpackedPk, UnpackedChallenge), FalconError> {
     let (sig, pk, challenge) = encoding::split_falcon_core_input(input)?;
     let (_salt, s2_compressed) = encoding::split_sig(sig)?;
 
     let pk_unpacked = unpack_falcon_14bit_be_polynomial(pk)?;
     let challenge_unpacked = unpack_falcon_14bit_be_polynomial(challenge)?;
+    let sig_unpacked = SigReader::new(s2_compressed)
+        .read_coefficients()
+        .ok_or(FalconError::InvalidSignatureEncoding)?;
 
-    Ok((s2_compressed, pk_unpacked, challenge_unpacked))
+    Ok((sig_unpacked, pk_unpacked, challenge_unpacked))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
-    use crate::falcon::utils::test::{sample_14bit_coeff, set_coeff_14bit_be};
+    use crate::falcon::utils::test::{
+        bits_to_buf, push_coeff, sample_14bit_coeff, set_coeff_14bit_be,
+    };
     use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, S2_COMPRESSED_LEN, SIG_LEN};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -122,9 +136,23 @@ mod tests {
 
         // Seeded-random signature bytes.
         let mut sig = [0u8; SIG_LEN];
-        for b in sig.iter_mut() {
+        for b in sig[..40].iter_mut() {
             *b = rng.random::<u8>();
         }
+
+        let mut sig_coefficients = Vec::new();
+        for _ in 0..512 {
+            sig_coefficients.push(rng.random::<i8>() as i32);
+        }
+        let mut s2_compressed_bits: Vec<u8> = Vec::new();
+        for &coeff in sig_coefficients.iter() {
+            push_coeff(&mut s2_compressed_bits, coeff);
+        }
+
+        // append sig_coefficients after the salt
+        let s2_compressed = bits_to_buf::<S2_COMPRESSED_LEN>(&s2_compressed_bits);
+        assert_eq!(SIG_LEN, 40 + s2_compressed.len());
+        sig[40..40 + s2_compressed.len()].copy_from_slice(s2_compressed.as_slice());
 
         // Seeded-random valid coefficients (< q) for pk and challenge.
         let mut pk_coeffs = [0u16; FALCON_N];
@@ -145,7 +173,7 @@ mod tests {
 
         let (sig_out, pk_unpacked, challenge_unpacked) = extract_inputs_if_valid(&input).unwrap();
 
-        assert_eq!(sig_out, encoding::split_sig(&sig).unwrap().1);
+        assert_eq!(&sig_out, sig_coefficients.as_slice());
         assert_eq!(pk_unpacked, pk_coeffs);
         assert_eq!(challenge_unpacked, challenge_coeffs);
     }
