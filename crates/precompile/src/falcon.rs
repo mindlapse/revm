@@ -36,6 +36,7 @@ pub mod h2p_shake256;
 pub mod h2p_keccakprng;
 
 mod encoding;
+mod ntt;
 mod sig_reader;
 mod utils;
 
