@@ -1,26 +1,44 @@
 use crate::falcon::{
     error::FalconError,
     ntt_consts::{roots_for_size, SQRT_MINUS_ONE_MOD_Q},
-    FALCON_N, FALCON_Q,
+    FALCON_Q,
 };
 
-/// Forward NTT on 512 coefficients (in-place), iterative, & panic-free.
+/// Forward NTT on 512 coefficients (in-place; uses fixed-size scratch buffers, no heap),
+/// iterative, & panic-free.
 ///
-/// This follows the canonical Falcon forward-NTT ordering used by the reference convention
-/// (conceptually: recursive split/merge), while remaining fully iterative:
+/// This implements the canonical Falcon forward-NTT output ordering (split/merge “leaf order”),
+/// while remaining fully iterative:
 /// 1) normalize input into canonical residues in `[0, q)`
 /// 2) reorder into the recursion “leaf order” (bit-reversal)
 /// 3) run bottom-up merges, writing interleaved outputs into a scratch buffer
+///
+/// Observable contract: each merge writes `(u + t, u - t)` to consecutive even/odd indices.
 #[inline]
 pub(crate) fn ntt_forward_in_place(a: &mut [i16; 512]) -> Result<(), FalconError> {
-    // Validate roots tables up-front so we fail before doing any input work.
-    let stage_roots = forward_stage_roots()?;
+    // Cheap deterministic preflight.
+    // Intentionally repeated here (no globals/atomics); hot paths should hoist this via
+    // `ntt_forward_in_place_with_stages`.
+    let stages = forward_stages()?;
+    ntt_forward_in_place_with_stages(a, &stages)
+}
 
+/// Same as `ntt_forward_in_place`, but takes prevalidated stage tables so callers can avoid
+/// rebuilding them on hot paths.
+///
+/// `stages` MUST be the value returned by `forward_stages()` for this build.
+#[inline]
+pub(crate) fn ntt_forward_in_place_with_stages(
+    a: &mut [i16; 512],
+    stages: &ForwardStages,
+) -> Result<(), FalconError> {
     // Normalize input into [0, q) so we can safely cast to u16.
+    // After normalization all coefficients are in [0, q) ⊂ [0, 2^15), so `as u16` is
+    // value-preserving.
     normalize_in_place(a);
 
     // Iterative bottom-up merge in canonical Falcon ordering.
-    ntt_forward_iterative_canonical_order(a, stage_roots)
+    ntt_forward_iterative_canonical_order(a, stages)
 }
 
 /// Normalize all coefficients into canonical residues in [0, q).
@@ -29,22 +47,34 @@ pub(crate) fn ntt_forward_in_place(a: &mut [i16; 512]) -> Result<(), FalconError
 fn normalize_in_place(a: &mut [i16; 512]) {
     let q: i32 = FALCON_Q as i32;
     for x in a.iter_mut() {
-        let mut v = (*x as i32) % q;
-        if v < 0 {
-            v += q;
-        }
-        *x = v as i16;
+        // Normalization is outside the NTT hot loop; a per-coefficient `% q` is acceptable
+        // and keeps the signed wrap handling obviously correct.
+        *x = (*x as i32).rem_euclid(q) as i16;
     }
 }
 
+// Falcon-512 parameter set: n = 512, q = 12289.
 const N: usize = 512;
-const STAGE_MS: [usize; 8] = [4, 8, 16, 32, 64, 128, 256, 512];
+const NSTAGES: usize = 8;
+
+/// Opaque stage tables for forward NTT; validated by `forward_stages()`.
+#[derive(Clone, Copy)]
+pub(crate) struct ForwardStages {
+    roots: [&'static [u16]; NSTAGES],
+    _sealed: Sealed,
+}
+#[derive(Clone, Copy)]
+struct Sealed;
+
+impl ForwardStages {
+    const MS: [usize; NSTAGES] = [4, 8, 16, 32, 64, 128, 256, 512];
+}
 
 #[inline]
-const fn bitrev9_usize(mut x: usize) -> usize {
+const fn bitrev9_u16(mut x: u16) -> u16 {
     // Reverse the low 9 bits of x (since n=512).
-    let mut r = 0usize;
-    let mut i = 0usize;
+    let mut r = 0u16;
+    let mut i: u8 = 0;
     while i < 9 {
         r = (r << 1) | (x & 1);
         x >>= 1;
@@ -58,43 +88,43 @@ const BITREV_9: [usize; N] = {
     let mut t = [0usize; N];
     let mut i = 0usize;
     while i < N {
-        t[i] = bitrev9_usize(i);
+        t[i] = bitrev9_u16(i as u16) as usize;
         i += 1;
     }
     t
 };
 
 #[inline]
-fn forward_stage_roots() -> Result<[&'static [u16]; 8], FalconError> {
-    let r4 = roots_for_size(4).ok_or(FalconError::InvalidNttConstants)?;
-    let r8 = roots_for_size(8).ok_or(FalconError::InvalidNttConstants)?;
-    let r16 = roots_for_size(16).ok_or(FalconError::InvalidNttConstants)?;
-    let r32 = roots_for_size(32).ok_or(FalconError::InvalidNttConstants)?;
-    let r64 = roots_for_size(64).ok_or(FalconError::InvalidNttConstants)?;
-    let r128 = roots_for_size(128).ok_or(FalconError::InvalidNttConstants)?;
-    let r256 = roots_for_size(256).ok_or(FalconError::InvalidNttConstants)?;
-    let r512 = roots_for_size(512).ok_or(FalconError::InvalidNttConstants)?;
+pub(crate) fn forward_stages() -> Result<ForwardStages, FalconError> {
+    // Stage sizes for bottom-up merges (m = 4, 8, ..., 512). Kept adjacent to `roots`
+    // so the pairing cannot drift without touching this one function.
+    let ms = ForwardStages::MS;
 
-    // Ensure all indexed accesses are provably in-bounds even if constants are corrupted.
-    if r4.len() != 4
-        || r8.len() != 8
-        || r16.len() != 16
-        || r32.len() != 32
-        || r64.len() != 64
-        || r128.len() != 128
-        || r256.len() != 256
-        || r512.len() != 512
-    {
-        return Err(FalconError::InvalidNttConstants);
+    // Placeholder initializer: overwritten for all stages before return.
+    let mut roots: [&'static [u16]; NSTAGES] = [&[]; NSTAGES];
+    for i in 0..NSTAGES {
+        roots[i] = roots_for_size(ms[i]).ok_or(FalconError::InvalidNttConstants)?;
     }
 
-    Ok([r4, r8, r16, r32, r64, r128, r256, r512])
+    // `ms` is compile-time fixed; these checks defend against table corruption/mismatched
+    // build artifacts so later indexing remains provably in-bounds.
+    // For each stage of size m, we run i in 0..half and read w[i<<1], i.e. indices 0, 2, ..., m-2.
+    for (&m, r) in ms.iter().zip(roots.iter()) {
+        if m > N || m < 4 || (m & (m - 1)) != 0 || r.len() != m {
+            return Err(FalconError::InvalidNttConstants);
+        }
+    }
+
+    Ok(ForwardStages {
+        roots,
+        _sealed: Sealed,
+    })
 }
 
 #[inline]
 fn ntt_forward_iterative_canonical_order(
     a: &mut [i16; 512],
-    stage_roots: [&'static [u16]; 8],
+    stages: &ForwardStages,
 ) -> Result<(), FalconError> {
     // Input is already normalized into [0, q) by the caller.
     // We'll use two stack buffers and swap references each stage (still iterative).
@@ -107,52 +137,77 @@ fn ntt_forward_iterative_canonical_order(
     let mut buf1 = [0u16; N];
 
     // Put input into the same “leaf order” produced by recursive split(): bit-reversal.
+    // Bit-reversal is an involution, so gather == scatter; gather is chosen for sequential writes.
     for i in 0..N {
-        buf0[BITREV_9[i]] = a[i] as u16;
+        buf0[i] = a[BITREV_9[i]] as u16;
     }
-
-    let mut src: &mut [u16; N] = &mut buf0;
-    let mut dst: &mut [u16; N] = &mut buf1;
 
     // Base case (m = 2): [u + sqr1*v, u - sqr1*v]
-    for base in (0..N).step_by(2) {
-        let u = src[base];
-        let v = src[base + 1];
-        let t = mul_mod_q(v, SQRT_MINUS_ONE_MOD_Q);
-        dst[base] = add_mod_q(u, t);
-        dst[base + 1] = sub_mod_q(u, t);
+    {
+        let src = &buf0;
+        let dst = &mut buf1;
+        for base in (0..N).step_by(2) {
+            let u = src[base];
+            let v = src[base + 1];
+            let t = mul_mod_q(v, SQRT_MINUS_ONE_MOD_Q);
+            dst[base] = add_mod_q(u, t);
+            dst[base + 1] = sub_mod_q(u, t);
+        }
     }
-    std::mem::swap(&mut src, &mut dst);
+
+    // After the base case we have written into buf1.
+    let mut src_is_buf0 = false;
 
     // Bottom-up merges for m = 4, 8, ..., 512.
-    for (stage_idx, &m) in STAGE_MS.iter().enumerate() {
-        let half = m / 2;
-        let w = stage_roots[stage_idx];
+    for stage_idx in 0..NSTAGES {
+        // Stage sizes are fixed by Falcon-512.
+        let m = ForwardStages::MS[stage_idx];
+        let half = m >> 1;
+        let w = stages.roots[stage_idx];
 
-        for base in (0..N).step_by(m) {
-            for i in 0..half {
-                let u = src[base + i];
-                let v = src[base + half + i];
-
-                // Canonical Falcon convention: for size m, twiddle index is 2*i.
-                let tw = w[2 * i];
-                let t = mul_mod_q(v, tw);
-
-                // Interleaved output indices as in merge_ntt.
-                let out = base + (i << 1);
-                dst[out] = add_mod_q(u, t);
-                dst[out + 1] = sub_mod_q(u, t);
-            }
+        // Alternating ping-pong buffers. Kept as two explicit cases so reference
+        // provenance is obvious and the borrow story stays simple.
+        if src_is_buf0 {
+            stage_merge_interleaved(&mut buf1, &buf0, half, w);
+        } else {
+            stage_merge_interleaved(&mut buf0, &buf1, half, w);
         }
 
-        std::mem::swap(&mut src, &mut dst);
+        src_is_buf0 = !src_is_buf0;
     }
 
+    // After each stage we flip; `src_is_buf0` indicates which buffer holds the latest results.
+    let src = if src_is_buf0 { &buf0 } else { &buf1 };
     for i in 0..N {
         a[i] = src[i] as i16;
     }
 
     Ok(())
+}
+
+#[inline]
+// Preconditions (enforced by `forward_stages()`):
+// - `half == m/2` where `m` is a validated power of two in [4, 512]
+// - `w.len() == 2*half` and we read indices 0, 2, ..., 2*half - 2
+fn stage_merge_interleaved(dst: &mut [u16; N], src: &[u16; N], half: usize, w: &[u16]) {
+    let m = half << 1;
+    for base in (0..N).step_by(m) {
+        let b2 = base + half;
+        for i in 0..half {
+            let u = src[base + i];
+            let v = src[b2 + i];
+
+            // Canonical Falcon convention: for size m, use the even-indexed twiddles.
+            let j = i << 1;
+            let tw = w[j];
+            let t = mul_mod_q(v, tw);
+
+            // Write outputs interleaved (even/odd) to match canonical ordering.
+            let out_even = base + j;
+            dst[out_even] = add_mod_q(u, t);
+            dst[out_even + 1] = sub_mod_q(u, t);
+        }
+    }
 }
 
 #[inline]
@@ -181,7 +236,8 @@ fn sub_mod_q(a: u16, b: u16) -> u16 {
 fn mul_mod_q(a: u16, b: u16) -> u16 {
     // Safe: (q-1)^2 < 2^28, no u32 overflow.
     // NOTE: This is intentionally reference-simple (`% q`) for correctness review.
-    // Swap to Montgomery/Barrett reduction later if profiling shows this is a bottleneck.
+    // Correctness-first: `% q` is deterministic and easy to audit; performance upgrades
+    // (Montgomery/Barrett reduction) can be reviewed separately.
     let q = FALCON_Q as u32;
     ((a as u32 * b as u32) % q) as u16
 }
@@ -191,8 +247,16 @@ fn mul_mod_q(a: u16, b: u16) -> u16 {
 mod tests {
 
     use super::*;
-    use crate::falcon::FALCON_Q;
+    use crate::falcon::{FALCON_N, FALCON_Q};
     use serde_json;
+
+    #[test]
+    fn test_bitrev9_is_involution_on_0_to_n() {
+        for i in 0..N {
+            let j = BITREV_9[i] as usize;
+            assert_eq!(BITREV_9[j] as usize, i, "bitrev not involutive at i={i}");
+        }
+    }
 
     #[test]
     fn test_add_mod_q_zero_identity_and_wrap_cases() {
