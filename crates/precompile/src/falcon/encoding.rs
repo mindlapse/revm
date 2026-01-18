@@ -369,7 +369,7 @@ mod tests {
     fn test_split_fixed_zero_left() {
         let input = [7, 8, 9];
         let (a, b) = split_fixed::<0, 3>(&input).unwrap();
-        assert_eq!(a, &[]);
+        assert_eq!(a, &[0u8; 0]);
         assert_eq!(b, &[7, 8, 9]);
     }
 
@@ -378,15 +378,15 @@ mod tests {
         let input = [5, 6, 7];
         let (a, b) = split_fixed::<3, 0>(&input).unwrap();
         assert_eq!(a, &[5, 6, 7]);
-        assert_eq!(b, &[]);
+        assert_eq!(b, &[0u8; 0]);
     }
 
     #[test]
     fn test_split_fixed_both_zero() {
         let input: [u8; 0] = [];
         let (a, b) = split_fixed::<0, 0>(&input).unwrap();
-        assert_eq!(a, &[]);
-        assert_eq!(b, &[]);
+        assert_eq!(a, &[0u8; 0]);
+        assert_eq!(b, &[0u8; 0]);
     }
 
     #[test]

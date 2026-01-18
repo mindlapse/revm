@@ -37,6 +37,7 @@ pub mod h2p_keccakprng;
 
 mod encoding;
 mod ntt;
+mod ntt_consts;
 mod sig_reader;
 mod utils;
 

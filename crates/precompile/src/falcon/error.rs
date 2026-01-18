@@ -29,6 +29,9 @@ pub enum FalconError {
 
     /// Sampling a usable coefficient failed after N tries.
     RejectionSamplingLimit { tries: usize },
+
+    /// Invalid NTT constants
+    InvalidNttConstants,
 }
 
 #[cfg(feature = "std")]
@@ -46,15 +49,16 @@ mod std_impls {
                         f,
                         "falcon: invalid input length (wanted {wanted}, got {got})"
                     )
-                }
+                },
                 FalconError::InvalidFieldElement => write!(f, "falcon: invalid field element"),
                 FalconError::InvalidSignatureEncoding => {
                     write!(f, "falcon: invalid signature encoding")
-                }
+                },
                 FalconError::SpecNotFinalized => write!(f, "falcon: spec not finalized"),
                 FalconError::RejectionSamplingLimit { tries } => {
                     write!(f, "falcon: sampling failed after {tries} tries")
-                }
+                },
+                FalconError::InvalidNttConstants => write!(f, "falcon: invalid NTT constants"),
             }
         }
     }

@@ -1,189 +1,782 @@
-mod consts {
+use crate::falcon::{
+    error::FalconError,
+    ntt_consts::{roots_for_size, SQRT_MINUS_ONE_MOD_Q},
+    FALCON_N, FALCON_Q,
+};
 
-    /// Roots of phi_4 = x^2 + 1.
-    pub(super) const PHI4_ROOTS_ZQ: [u16; 2] = [1479, 10810];
+/// Forward NTT on 512 coefficients (in-place), iterative, & panic-free.
+///
+/// This follows the canonical Falcon forward-NTT ordering used by the reference convention
+/// (conceptually: recursive split/merge), while remaining fully iterative:
+/// 1) normalize input into canonical residues in `[0, q)`
+/// 2) reorder into the recursion “leaf order” (bit-reversal)
+/// 3) run bottom-up merges, writing interleaved outputs into a scratch buffer
+#[inline]
+pub(crate) fn ntt_forward_in_place(a: &mut [i16; 512]) -> Result<(), FalconError> {
+    // Validate roots tables up-front so we fail before doing any input work.
+    let stage_roots = forward_stage_roots()?;
 
-    /// """Roots of phi_8 = x^4 + 1"""
-    pub(super) const PHI8_ROOTS_ZQ: [u16; 4] = [4043, 8246, 5146, 7143];
+    // Normalize input into [0, q) so we can safely cast to u16.
+    normalize_in_place(a);
 
-    /// """Roots of phi_16 = x^8 + 1"""
-    pub(super) const PHI16_ROOTS_ZQ: [u16; 8] = [5736, 6553, 4134, 8155, 722, 11567, 1305, 10984];
+    // Iterative bottom-up merge in canonical Falcon ordering.
+    ntt_forward_iterative_canonical_order(a, stage_roots)
+}
 
-    /// """Roots of phi_32 = x^16 + 1"""
-    pub(super) const PHI32_ROOTS_ZQ: [u16; 16] = [1646, 10643, 1212, 11077, 5860, 6429, 3195, 9094, 2545, 9744, 3621, 8668, 3504, 8785, 3542, 8747];
+/// Normalize all coefficients into canonical residues in [0, q).
+/// Fixed bound loop; no allocation; no panics.
+#[inline]
+fn normalize_in_place(a: &mut [i16; 512]) {
+    let q: i32 = FALCON_Q as i32;
+    for x in a.iter_mut() {
+        let mut v = (*x as i32) % q;
+        if v < 0 {
+            v += q;
+        }
+        *x = v as i16;
+    }
+}
 
-    /// """Roots of phi_64 = x^32 + 1"""
-    pub(super) const PHI64_ROOTS_ZQ: [u16; 32] = [4591, 7698, 5728, 6561, 5023, 7266, 5828, 6461, 4978, 7311, 1351, 10938, 3328, 8961, 5777, 6512, 2975, 9314, 563, 11726, 3006, 9283, 2744, 9545, 949, 11340, 2625, 9664, 4821, 7468, 2639, 9650];
+const N: usize = 512;
+const STAGE_MS: [usize; 8] = [4, 8, 16, 32, 64, 128, 256, 512];
 
-    /// """Roots of phi_128 = x^64 + 1"""
-    pub(super) const PHI128_ROOTS_ZQ: [u16; 64] = [1000, 11289, 4320, 7969, 3091, 9198, 81, 12208, 2963, 9326, 4896, 7393, 3051, 9238, 2366, 9923, 1853, 10436, 140, 12149, 4611, 7678, 726, 11563, 4255, 8034, 1177, 11112, 2768, 9521, 1635, 10654, 3712, 8577, 3135, 9154, 2747, 9542, 4846, 7443, 3553, 8736, 4805, 7484, 2294, 9995, 1062, 11227, 1326, 10963, 5086, 7203, 3014, 9275, 3201, 9088, 1170, 11119, 2319, 9970, 955, 11334, 790, 11499];
+#[inline]
+const fn bitrev9_usize(mut x: usize) -> usize {
+    // Reverse the low 9 bits of x (since n=512).
+    let mut r = 0usize;
+    let mut i = 0usize;
+    while i < 9 {
+        r = (r << 1) | (x & 1);
+        x >>= 1;
+        i += 1;
+    }
+    r
+}
 
-    /// """Roots of phi_256 = x^128 + 1"""
-    pub(super) const PHI256_ROOTS_ZQ: [u16; 128] = [544, 11745, 5791, 6498, 339, 11950, 2468, 9821, 2842, 9447, 480, 11809, 9, 12280, 1022, 11267, 4278, 8011, 1673, 10616, 4989, 7300, 5331, 6958, 3584, 8705, 4177, 8112, 1381, 10908, 2525, 9764, 2396, 9893, 4452, 7837, 3296, 8993, 3949, 8340, 130, 12159, 4354, 7935, 5374, 6915, 2837, 9452, 5767, 6522, 827, 11462, 3748, 8541, 953, 11336, 5067, 7222, 2197, 10092, 118, 12171, 2476, 9813, 2548, 9741, 4231, 8058, 355, 11934, 3382, 8907, 3707, 8582, 1759, 10530, 3694, 8595, 5179, 7110, 5542, 6747, 145, 12144, 3637, 8652, 3459, 8830, 5911, 6378, 4890, 7399, 3932, 8357, 2731, 9558, 2089, 10200, 5092, 7197, 2881, 9408, 3284, 9005, 729, 11560, 3241, 9048, 3289, 9000, 2013, 10276, 5755, 6534, 4632, 7657, 1260, 11029, 4388, 7901, 334, 11955, 2426, 9863, 1696, 10593, 1428, 10861];
+// Constant-time-ish and branch-free at runtime: computed entirely at compile time.
+const BITREV_9: [usize; N] = {
+    let mut t = [0usize; N];
+    let mut i = 0usize;
+    while i < N {
+        t[i] = bitrev9_usize(i);
+        i += 1;
+    }
+    t
+};
 
+#[inline]
+fn forward_stage_roots() -> Result<[&'static [u16]; 8], FalconError> {
+    let r4 = roots_for_size(4).ok_or(FalconError::InvalidNttConstants)?;
+    let r8 = roots_for_size(8).ok_or(FalconError::InvalidNttConstants)?;
+    let r16 = roots_for_size(16).ok_or(FalconError::InvalidNttConstants)?;
+    let r32 = roots_for_size(32).ok_or(FalconError::InvalidNttConstants)?;
+    let r64 = roots_for_size(64).ok_or(FalconError::InvalidNttConstants)?;
+    let r128 = roots_for_size(128).ok_or(FalconError::InvalidNttConstants)?;
+    let r256 = roots_for_size(256).ok_or(FalconError::InvalidNttConstants)?;
+    let r512 = roots_for_size(512).ok_or(FalconError::InvalidNttConstants)?;
 
-    /// """Roots of phi_512 = x^256 + 1"""
-    pub(super) const PHI512_ROOTS_ZQ: [u16; 256] = [1663, 10626, 1777, 10512, 1426, 10863, 4654, 7635, 5291, 6998, 2704, 9585, 4938, 7351, 3636, 8653, 3915, 8374, 2166, 10123, 113, 12176, 4919, 7370, 3, 12286, 4437, 7852, 160, 12129, 3149, 9140, 4057, 8232, 3271, 9018, 1689, 10600, 3364, 8925, 4372, 7917, 2174, 10115, 4414, 7875, 2847, 9442, 2645, 9644, 4053, 8236, 2305, 9984, 5042, 7247, 5195, 7094, 2780, 9509, 1484, 10805, 4895, 7394, 3016, 9273, 243, 12046, 3000, 9289, 671, 11618, 3136, 9153, 5191, 7098, 2399, 9890, 3400, 8889, 2178, 10111, 1544, 10745, 420, 11869, 5559, 6730, 476, 11813, 3531, 8758, 3985, 8304, 4905, 7384, 5332, 6957, 3510, 8779, 2370, 9919, 2865, 9424, 2969, 9320, 3978, 8311, 2686, 9603, 3247, 9042, 4048, 8241, 2249, 10040, 1153, 11136, 2884, 9405, 5407, 6882, 3186, 9103, 1630, 10659, 2126, 10163, 2187, 10102, 2566, 9723, 2422, 9867, 6039, 6250, 2987, 9302, 6022, 6267, 2437, 9852, 3646, 8643, 875, 11414, 3780, 8509, 1607, 10682, 4976, 7313, 5011, 7278, 1002, 11287, 4284, 8005, 5088, 7201, 3248, 9041, 1207, 11082, 1168, 11121, 5277, 7012, 1065, 11224, 2143, 10146, 404, 11885, 4645, 7644, 1912, 10377, 1378, 10911, 435, 11854, 4337, 7952, 2381, 9908, 5444, 6845, 4096, 8193, 493, 11796, 545, 11744, 5019, 7270, 3704, 8585, 2678, 9611, 1537, 10752, 242, 12047, 4714, 7575, 4143, 8146, 27, 12262, 3066, 9223, 3763, 8526, 1440, 10849, 5084, 7205, 1632, 10657, 1017, 11272, 4885, 7404, 3778, 8511, 3833, 8456, 390, 11899, 773, 11516, 2401, 9888, 442, 11847, 5101, 7188, 1067, 11222, 2912, 9377, 5698, 6591, 354, 11935, 4861, 7428, 2859, 9430, 1045, 11244, 5012, 7277, 2481, 9808];
+    // Ensure all indexed accesses are provably in-bounds even if constants are corrupted.
+    if r4.len() != 4
+        || r8.len() != 8
+        || r16.len() != 16
+        || r32.len() != 32
+        || r64.len() != 64
+        || r128.len() != 128
+        || r256.len() != 256
+        || r512.len() != 512
+    {
+        return Err(FalconError::InvalidNttConstants);
+    }
 
+    Ok([r4, r8, r16, r32, r64, r128, r256, r512])
+}
 
-    // """Roots of phi_1024 = x^512 + 1"""
-    pub(super) const PHI1024_ROOTS_ZQ: [u16; 512] = [3957, 8332, 2839, 9450, 2127, 10162, 151, 12138, 431, 11858, 1579, 10710, 5906, 6383, 2505, 9784, 1323, 10966, 2766, 9523, 52, 12237, 3174, 9115, 6055, 6234, 3336, 8953, 677, 11612, 5874, 6415, 4169, 8120, 3127, 9162, 5241, 7048, 2920, 9369, 1010, 11279, 5468, 6821, 787, 11502, 3482, 8807, 1321, 10968, 192, 12097, 4912, 7377, 2049, 10240, 4698, 7591, 5057, 7232, 4780, 7509, 3445, 8844, 1956, 10333, 5009, 7280, 6008, 6281, 885, 11404, 3532, 8757, 1003, 11286, 58, 12231, 241, 12048, 975, 11314, 4212, 8077, 2844, 9445, 3438, 8851, 1105, 11184, 142, 12147, 5681, 6608, 3477, 8812, 2302, 9987, 605, 11684, 4213, 8076, 504, 11785, 5886, 6403, 4782, 7507, 5594, 6695, 3029, 9260, 421, 11868, 4080, 8209, 6068, 6221, 3602, 8687, 6077, 6212, 4624, 7665, 3263, 9026, 3600, 8689, 4948, 7341, 6137, 6152, 400, 11889, 1728, 10561, 5862, 6427, 6136, 6153, 5415, 6874, 3643, 8646, 56, 12233, 3199, 9090, 5206, 7083, 5529, 6760, 3565, 8724, 654, 11635, 1987, 10302, 1702, 10587, 3988, 8301, 468, 11821, 316, 11973, 382, 11907, 3710, 8579, 6093, 6196, 5446, 6843, 5339, 6950, 973, 11316, 1254, 11035, 1359, 10930, 5435, 6854, 2033, 10256, 3998, 8291, 3879, 8410, 1922, 10367, 3860, 8429, 5445, 6844, 4536, 7753, 1050, 11239, 3818, 8471, 6118, 6171, 1190, 11099, 2683, 9606, 3789, 8500, 147, 12142, 5456, 6833, 4449, 7840, 4749, 7540, 5537, 6752, 4789, 7500, 4467, 7822, 1018, 11271, 5925, 6364, 1041, 11248, 3514, 8775, 2344, 9945, 1278, 11011, 5574, 6715, 1973, 10316, 4324, 7965, 4916, 7373, 4075, 8214, 5315, 6974, 5079, 7210, 3262, 9027, 522, 11767, 2169, 10120, 1200, 11089, 5184, 7105, 2555, 9734, 6122, 6167, 5297, 6992, 6119, 6170, 3956, 8333, 1360, 10929, 1962, 10327, 1594, 10695, 5961, 6328, 5106, 7183, 4298, 7991, 3329, 8960, 168, 12121, 2692, 9597, 4049, 8240, 3728, 8561, 1159, 11130, 5990, 6299, 948, 11341, 1146, 11143, 1404, 10885, 325, 11964, 5766, 6523, 652, 11637, 295, 11994, 6099, 6190, 2919, 9370, 3762, 8527, 4016, 8273, 4077, 8212, 6065, 6224, 835, 11454, 3570, 8719, 4240, 8049, 4046, 8243, 709, 11580, 3150, 9139, 1319, 10970, 1058, 11231, 4079, 8210, 922, 11367, 441, 11848, 4322, 7967, 1958, 10331, 2078, 10211, 1112, 11177, 3834, 8455, 5257, 7032, 4433, 7856, 5919, 6370, 5486, 6803, 3054, 9235, 1747, 10542, 3123, 9166, 2948, 9341, 2503, 9786, 5782, 6507, 1566, 10723, 64, 12225, 3656, 8633, 2459, 9830, 683, 11606, 1293, 10996, 4737, 7552, 5429, 6860, 4774, 7515, 5908, 6381, 453, 11836, 418, 11871, 3772, 8517, 3991, 8298, 3969, 8320, 2767, 9522, 156, 12133, 2281, 10008, 5876, 6413, 5333, 6956, 2031, 10258, 3963, 8326, 576, 11713, 2447, 9842, 6142, 6147, 2051, 10238, 1954, 10335, 1805, 10484, 2882, 9407, 3529, 8760, 3434, 8855, 2908, 9381, 218, 12071, 3030, 9259, 4115, 8174, 1843, 10446, 2361, 9928, 3202, 9087, 4493, 7796, 2057, 10232, 5369, 6920, 1512, 10777, 350, 11939, 1815, 10474, 5383, 6906, 49, 12240, 1263, 11026, 5915, 6374, 1483, 10806, 1489, 10800, 2500, 9789, 5942, 6347, 1583, 10706, 1693, 10596, 3009, 9280, 174, 12115, 723, 11566, 2738, 9551, 5868, 6421, 5735, 6554, 2655, 9634, 3315, 8974, 426, 11863, 4754, 7535, 1858, 10431, 1975, 10314, 3757, 8532, 2925, 9364, 347, 11942];
+#[inline]
+fn ntt_forward_iterative_canonical_order(
+    a: &mut [i16; 512],
+    stage_roots: [&'static [u16]; 8],
+) -> Result<(), FalconError> {
+    // Input is already normalized into [0, q) by the caller.
+    // We'll use two stack buffers and swap references each stage (still iterative).
+    //
+    // No-panics narrative:
+    // - All loops have fixed bounds under N=512.
+    // - Root slices were validated to have length m for each stage.
+    // - All indices are derived from fixed ranges and validated slice lengths.
+    let mut buf0 = [0u16; N];
+    let mut buf1 = [0u16; N];
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use std::collections::HashSet;
+    // Put input into the same “leaf order” produced by recursive split(): bit-reversal.
+    for i in 0..N {
+        buf0[BITREV_9[i]] = a[i] as u16;
+    }
 
-        // Falcon prime modulus
-        const Q: u32 = 12_289;
+    let mut src: &mut [u16; N] = &mut buf0;
+    let mut dst: &mut [u16; N] = &mut buf1;
 
-        #[inline]
-        fn mod_mul(a: u32, b: u32) -> u32 {
-            (a * b) % Q
+    // Base case (m = 2): [u + sqr1*v, u - sqr1*v]
+    for base in (0..N).step_by(2) {
+        let u = src[base];
+        let v = src[base + 1];
+        let t = mul_mod_q(v, SQRT_MINUS_ONE_MOD_Q);
+        dst[base] = add_mod_q(u, t);
+        dst[base + 1] = sub_mod_q(u, t);
+    }
+    std::mem::swap(&mut src, &mut dst);
+
+    // Bottom-up merges for m = 4, 8, ..., 512.
+    for (stage_idx, &m) in STAGE_MS.iter().enumerate() {
+        let half = m / 2;
+        let w = stage_roots[stage_idx];
+
+        for base in (0..N).step_by(m) {
+            for i in 0..half {
+                let u = src[base + i];
+                let v = src[base + half + i];
+
+                // Canonical Falcon convention: for size m, twiddle index is 2*i.
+                let tw = w[2 * i];
+                let t = mul_mod_q(v, tw);
+
+                // Interleaved output indices as in merge_ntt.
+                let out = base + (i << 1);
+                dst[out] = add_mod_q(u, t);
+                dst[out + 1] = sub_mod_q(u, t);
+            }
         }
 
-        #[inline]
-        fn mod_pow(mut base: u32, mut exp: u32) -> u32 {
-            base %= Q;
-            let mut acc: u32 = 1;
-            while exp > 0 {
-                if (exp & 1) == 1 {
-                    acc = mod_mul(acc, base);
+        std::mem::swap(&mut src, &mut dst);
+    }
+
+    for i in 0..N {
+        a[i] = src[i] as i16;
+    }
+
+    Ok(())
+}
+
+#[inline]
+fn add_mod_q(a: u16, b: u16) -> u16 {
+    let q = FALCON_Q as u32;
+    let mut s = a as u32 + b as u32;
+    if s >= q {
+        s -= q;
+    }
+    s as u16
+}
+
+#[inline]
+fn sub_mod_q(a: u16, b: u16) -> u16 {
+    let q = FALCON_Q as u32;
+    let aa = a as u32;
+    let bb = b as u32;
+    if aa >= bb {
+        (aa - bb) as u16
+    } else {
+        (aa + q - bb) as u16
+    }
+}
+
+#[inline]
+fn mul_mod_q(a: u16, b: u16) -> u16 {
+    // Safe: (q-1)^2 < 2^28, no u32 overflow.
+    // NOTE: This is intentionally reference-simple (`% q`) for correctness review.
+    // Swap to Montgomery/Barrett reduction later if profiling shows this is a bottleneck.
+    let q = FALCON_Q as u32;
+    ((a as u32 * b as u32) % q) as u16
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::falcon::FALCON_Q;
+    use serde_json;
+
+    #[test]
+    fn test_add_mod_q_zero_identity_and_wrap_cases() {
+        let q = FALCON_Q as u16;
+
+        // identity
+        assert_eq!(add_mod_q(0, 0), 0);
+        assert_eq!(add_mod_q(0, 1), 1);
+        assert_eq!(add_mod_q(1, 0), 1);
+
+        // no wrap
+        assert_eq!(add_mod_q(2, 3), 5);
+
+        // exact wrap at q
+        assert_eq!(add_mod_q(q - 1, 1), 0);
+        assert_eq!(add_mod_q(1, q - 1), 0);
+
+        // near wrap
+        assert_eq!(add_mod_q(q - 2, 1), q - 1);
+        assert_eq!(add_mod_q(q - 2, 2), 0);
+
+        // double max (requires single subtraction only)
+        // (q-1) + (q-1) = 2q - 2 -> q - 2
+        assert_eq!(add_mod_q(q - 1, q - 1), q - 2);
+    }
+
+    #[test]
+    fn test_add_mod_q_commutative_on_representative_values() {
+        let q = FALCON_Q as u16;
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                assert_eq!(add_mod_q(a, b), add_mod_q(b, a));
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_mod_q_matches_reference_for_representative_values() {
+        let q = FALCON_Q as u32;
+        let samples: [u16; 10] = [
+            0,
+            1,
+            2,
+            3,
+            17,
+            123,
+            (FALCON_Q / 2) as u16,
+            (FALCON_Q - 3) as u16,
+            (FALCON_Q - 2) as u16,
+            (FALCON_Q - 1) as u16,
+        ];
+
+        for &a in &samples {
+            for &b in &samples {
+                let got = add_mod_q(a, b) as u32;
+                let want = ((a as u32 + b as u32) % q) as u32;
+                assert_eq!(got, want, "a={a}, b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_add_mod_q_output_is_in_range_for_representative_values() {
+        let q = FALCON_Q as u16;
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                let r = add_mod_q(a, b);
+                assert!(r < q, "result out of range: a={a}, b={b}, r={r}, q={q}");
+            }
+        }
+    }
+
+
+    #[test]
+    fn test_sub_mod_q_zero_identity_and_wrap_cases() {
+        let q = FALCON_Q as u16;
+
+        // identity / basic
+        assert_eq!(sub_mod_q(0, 0), 0);
+        assert_eq!(sub_mod_q(1, 0), 1);
+
+        // no wrap (aa >= bb)
+        assert_eq!(sub_mod_q(5, 3), 2);
+        assert_eq!(sub_mod_q(q - 1, 1), q - 2);
+
+        // wrap (aa < bb)
+        assert_eq!(sub_mod_q(0, 1), q - 1);
+        assert_eq!(sub_mod_q(1, 2), q - 1);
+        assert_eq!(sub_mod_q(2, q - 1), 3);
+
+        // edge wrap: 0 - (q-1) = 1
+        assert_eq!(sub_mod_q(0, q - 1), 1);
+
+        // exact equal
+        assert_eq!(sub_mod_q(q - 1, q - 1), 0);
+    }
+
+    #[test]
+    fn test_sub_mod_q_matches_reference_for_representative_values() {
+        let q = FALCON_Q as u32;
+
+        let samples: [u16; 10] = [
+            0,
+            1,
+            2,
+            3,
+            17,
+            123,
+            (FALCON_Q / 2) as u16,
+            (FALCON_Q - 3) as u16,
+            (FALCON_Q - 2) as u16,
+            (FALCON_Q - 1) as u16,
+        ];
+
+        for &a in &samples {
+            for &b in &samples {
+                let got = sub_mod_q(a, b) as u32;
+                // Reference: (a - b) mod q, computed safely in u32.
+                let want = ((a as u32 + q) - b as u32) % q;
+                assert_eq!(got, want, "a={a}, b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sub_mod_q_is_additive_inverse_via_add_mod_q_on_representative_values() {
+        let q = FALCON_Q as u16;
+
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                // (a - b) + b == a  (mod q)
+                let r = add_mod_q(sub_mod_q(a, b), b);
+                assert_eq!(r, a, "a={a}, b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sub_mod_q_output_is_in_range_for_representative_values() {
+        let q = FALCON_Q as u16;
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                let r = sub_mod_q(a, b);
+                assert!(r < q, "result out of range: a={a}, b={b}, r={r}, q={q}");
+            }
+        }
+    }
+
+
+    #[test]
+    fn test_mul_mod_q_zero_and_identity_cases() {
+        let q = FALCON_Q as u16;
+
+        assert_eq!(mul_mod_q(0, 0), 0);
+        assert_eq!(mul_mod_q(0, 1), 0);
+        assert_eq!(mul_mod_q(1, 0), 0);
+
+        assert_eq!(mul_mod_q(1, 1), 1);
+        assert_eq!(mul_mod_q(1, 2), 2);
+        assert_eq!(mul_mod_q(2, 1), 2);
+
+        // a * 0 == 0, a * 1 == a (for representative values)
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+        for &a in &samples {
+            assert_eq!(mul_mod_q(a, 0), 0, "a={a}");
+            assert_eq!(mul_mod_q(0, a), 0, "a={a}");
+            assert_eq!(mul_mod_q(a, 1), a % q, "a={a}");
+            assert_eq!(mul_mod_q(1, a), a % q, "a={a}");
+        }
+    }
+
+    #[test]
+    fn test_mul_mod_q_wrap_cases_near_modulus() {
+        let q = FALCON_Q as u16;
+
+        // (q-1) * (q-1) = 1 mod q
+        assert_eq!(mul_mod_q(q - 1, q - 1), 1);
+
+        // (q-1) * x = -x mod q = q - x (for x != 0)
+        assert_eq!(mul_mod_q(q - 1, 1), q - 1);
+        assert_eq!(mul_mod_q(q - 1, 2), q - 2);
+        assert_eq!(mul_mod_q(q - 1, q - 2), 2);
+
+        // (q-2) * (q-2) = 4 mod q
+        assert_eq!(mul_mod_q(q - 2, q - 2), 4);
+
+        // (q-2) * (q-1) = 2 mod q
+        assert_eq!(mul_mod_q(q - 2, q - 1), 2);
+        assert_eq!(mul_mod_q(q - 1, q - 2), 2);
+    }
+
+    #[test]
+    fn test_mul_mod_q_commutative_on_representative_values() {
+        let q = FALCON_Q as u16;
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                assert_eq!(mul_mod_q(a, b), mul_mod_q(b, a), "a={a}, b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mul_mod_q_distributes_over_add_mod_q_on_small_representative_values() {
+        // Check: a*(b+c) == a*b + a*c (mod q)
+        // Use smaller samples to keep test compact and readable.
+        let q = FALCON_Q as u16;
+        let a_samples: [u16; 6] = [0, 1, 2, 17, q - 2, q - 1];
+        let bc_samples: [u16; 6] = [0, 1, 2, 3, 17, q - 1];
+
+        for &a in &a_samples {
+            for &b in &bc_samples {
+                for &c in &bc_samples {
+                    let left = mul_mod_q(a, add_mod_q(b, c));
+                    let right = add_mod_q(mul_mod_q(a, b), mul_mod_q(a, c));
+                    assert_eq!(left, right, "a={a}, b={b}, c={c}");
                 }
-                base = mod_mul(base, base);
-                exp >>= 1;
-            }
-            acc
-        }
-
-        fn assert_in_range_and_unique(name: &str, roots: &[u16]) {
-            let mut seen = HashSet::<u16>::with_capacity(roots.len());
-            for &r in roots {
-                assert!(r != 0, "{name}: contains 0");
-                assert!((r as u32) < Q, "{name}: contains value >= Q: {r}");
-                assert!(
-                    seen.insert(r),
-                    "{name}: duplicate value detected: {r}"
-                );
             }
         }
+    }
 
-        fn assert_signed_pairs(name: &str, roots: &[u16]) {
+    #[test]
+    fn test_mul_mod_q_matches_reference_for_representative_values() {
+        let q = FALCON_Q as u32;
+        let samples: [u16; 10] = [
+            0,
+            1,
+            2,
+            3,
+            17,
+            123,
+            (FALCON_Q / 2) as u16,
+            (FALCON_Q - 3) as u16,
+            (FALCON_Q - 2) as u16,
+            (FALCON_Q - 1) as u16,
+        ];
+
+        for &a in &samples {
+            for &b in &samples {
+                let got = mul_mod_q(a, b) as u32;
+                let want = ((a as u32 * b as u32) % q) as u32;
+                assert_eq!(got, want, "a={a}, b={b}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_mul_mod_q_output_is_in_range_for_representative_values() {
+        let q = FALCON_Q as u16;
+        let samples: [u16; 8] = [0, 1, 2, 17, q / 2, q - 2, q - 1, 123];
+
+        for &a in &samples {
+            for &b in &samples {
+                let r = mul_mod_q(a, b);
+                assert!(r < q, "result out of range: a={a}, b={b}, r={r}, q={q}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_normalize_in_place_basic_and_wrap_cases() {
+        let q = FALCON_Q as i16;
+
+        let mut a = [0i16; 512];
+        a[0] = 0;
+        a[1] = 1;
+        a[2] = -1;
+        a[3] = q;
+        a[4] = q + 1;
+        a[5] = -q;
+        a[6] = -q + 1;
+        a[7] = (FALCON_Q - 1) as i16;
+        a[8] = -((FALCON_Q - 1) as i16);
+
+        normalize_in_place(&mut a);
+
+        assert_eq!(a[0], 0);
+        assert_eq!(a[1], 1);
+        assert_eq!(a[2], q - 1);
+
+        assert_eq!(a[3], 0);
+        assert_eq!(a[4], 1);
+        assert_eq!(a[5], 0);
+        assert_eq!(a[6], 1);
+
+        assert_eq!(a[7], (FALCON_Q - 1) as i16);
+        assert_eq!(a[8], 1);
+    }
+
+    #[test]
+    fn test_normalize_in_place_outputs_are_in_range() {
+        let q = FALCON_Q as i16;
+
+        let mut a = [0i16; 512];
+        // Populate a variety of values, including negatives.
+        a[0] = 0;
+        a[1] = 1;
+        a[2] = -1;
+        a[3] = 17;
+        a[4] = -17;
+        a[5] = (FALCON_Q / 2) as i16;
+        a[6] = -((FALCON_Q / 2) as i16);
+        a[7] = (FALCON_Q - 1) as i16;
+        a[8] = -((FALCON_Q - 1) as i16);
+
+        // Also include extremes of i16 to ensure behavior stays sane.
+        a[9] = i16::MIN;
+        a[10] = i16::MAX;
+
+        normalize_in_place(&mut a);
+
+        for (idx, &x) in a.iter().enumerate() {
             assert!(
-                roots.len() % 2 == 0,
-                "{name}: length must be even to be arranged in ± pairs"
+                x >= 0 && x < q,
+                "out of range at idx={idx}: x={x}, q={q}"
             );
-            for i in (0..roots.len()).step_by(2) {
-                let a = roots[i] as u32;
-                let b = roots[i + 1] as u32;
-                assert_eq!(
-                    (a + b) % Q,
-                    0,
-                    "{name}: entries at [{i}], [{i}+1] are not additive inverses mod Q"
+        }
+    }
+
+    #[test]
+    fn test_normalize_in_place_matches_reference_on_representative_values() {
+        let q = FALCON_Q as i32;
+
+        let mut a = [0i16; 512];
+        let samples: [i16; 12] = [
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            17,
+            -17,
+            (FALCON_Q / 2) as i16,
+            -((FALCON_Q / 2) as i16),
+            (FALCON_Q - 1) as i16,
+            -((FALCON_Q - 1) as i16),
+            FALCON_Q as i16,
+        ];
+
+        for (i, &v) in samples.iter().enumerate() {
+            a[i] = v;
+        }
+
+        normalize_in_place(&mut a);
+
+        for (i, &orig) in samples.iter().enumerate() {
+            let got = a[i] as i32;
+            let want = {
+                let mut t = (orig as i32) % q;
+                if t < 0 {
+                    t += q;
+                }
+                t
+            };
+            assert_eq!(got, want, "idx={i}, orig={orig}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_in_place_is_idempotent() {
+        let mut a = [0i16; 512];
+
+        // Fill with a repeating pattern including negatives and near-q values.
+        // This stays within i16 comfortably.
+        for i in 0..512 {
+            a[i] = match i % 6 {
+                0 => 0,
+                1 => 1,
+                2 => -1,
+                3 => 17,
+                4 => -17,
+                _ => (FALCON_Q - 1) as i16,
+            };
+        }
+
+        normalize_in_place(&mut a);
+        let once = a;
+
+        normalize_in_place(&mut a);
+        assert_eq!(a, once);
+    }
+
+    #[test]
+    fn test_normalize_in_place_preserves_congruence_mod_q_on_selected_indices() {
+        // For selected indices, check: x and x + k*q normalize the same (within i16 limits).
+        let q = FALCON_Q as i16;
+
+        let mut a1 = [0i16; 512];
+        let mut a2 = [0i16; 512];
+
+        // Pick a few indices and values that won't overflow i16 when adding +/-2q.
+        let cases: [(usize, i16, i16); 6] = [
+            (0, 0, 2),
+            (1, 1, -2),
+            (2, -1, 1),
+            (3, 17, -1),
+            (4, -17, 2),
+            (5, (FALCON_Q / 2) as i16, -2),
+        ];
+
+        for &(idx, x, k) in &cases {
+            a1[idx] = x;
+            a2[idx] = x.wrapping_add(k.wrapping_mul(q));
+        }
+
+        normalize_in_place(&mut a1);
+        normalize_in_place(&mut a2);
+
+        for &(idx, _, _) in &cases {
+            assert_eq!(a1[idx], a2[idx], "idx={idx}");
+        }
+    }
+
+
+
+    fn assert_all_in_range(a: &[i16; 512]) {
+        let q = FALCON_Q as i16;
+        for (i, &x) in a.iter().enumerate() {
+            assert!(
+                x >= 0 && x < q,
+                "coefficient out of range at idx={i}: x={x}, q={q}"
+            );
+        }
+    }
+
+
+    #[test]
+    fn test_ntt_forward_in_place_matches_manual_composition_on_dirty_input() {
+        let mut input = [0i16; 512];
+
+        // A deliberately "dirty" mix: negatives, >q values, and i16 extremes.
+        // This is exactly what normalize_in_place is meant to tame.
+        for i in 0..512 {
+            input[i] = match i % 9 {
+                0 => 0,
+                1 => 1,
+                2 => -1,
+                3 => FALCON_Q as i16,
+                4 => (FALCON_Q as i16) + 1,
+                5 => -((FALCON_Q as i16)),
+                6 => -((FALCON_Q as i16)) + 1,
+                7 => i16::MIN,
+                _ => i16::MAX,
+            };
+        }
+
+        // Wrapper result
+        let mut got = input;
+        ntt_forward_in_place(&mut got).expect("ntt_forward_in_place failed");
+        assert_all_in_range(&got);
+
+        // Normalization should not affect the result (the wrapper normalizes internally).
+        let mut want = input;
+        normalize_in_place(&mut want);
+        ntt_forward_in_place(&mut want).expect("ntt_forward_in_place failed (normalized)");
+        assert_all_in_range(&want);
+
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ntt_forward_in_place_equals_core_on_already_normalized_input() {
+        let mut input = [0i16; 512];
+
+        // Deterministic normalized pattern in [0, q)
+        for i in 0..512 {
+            input[i] = ((i * 17 + 123) % (FALCON_Q as usize)) as i16;
+        }
+
+        // Wrapper result
+        let mut got = input;
+        ntt_forward_in_place(&mut got).expect("ntt_forward_in_place failed");
+        assert_all_in_range(&got);
+
+        // Explicitly normalizing first should not change anything.
+        let mut want = input;
+        normalize_in_place(&mut want);
+        ntt_forward_in_place(&mut want).expect("ntt_forward_in_place failed (explicit normalize)");
+        assert_all_in_range(&want);
+
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_ntt_forward_in_place_is_deterministic_on_dirty_input() {
+        let mut input = [0i16; 512];
+
+        for i in 0..512 {
+            // Another dirty-but-deterministic pattern.
+            // Keep arithmetic in i32 to avoid any accidental overflow assumptions.
+            let v = (i as i32 * 257 - 999) as i32;
+            input[i] = match i % 4 {
+                0 => v as i16,
+                1 => (v + FALCON_Q as i32) as i16,
+                2 => (v - FALCON_Q as i32) as i16,
+                _ => (v + 3 * FALCON_Q as i32) as i16,
+            };
+        }
+
+        let mut a1 = input;
+        let mut a2 = input;
+
+        ntt_forward_in_place(&mut a1).expect("ntt_forward_in_place failed (a1)");
+        ntt_forward_in_place(&mut a2).expect("ntt_forward_in_place failed (a2)");
+
+        assert_eq!(a1, a2);
+        assert_all_in_range(&a1);
+    }
+
+    #[test]
+    fn test_ntt_forward_in_place_output_is_in_range_for_varied_input() {
+        let mut input = [0i16; 512];
+
+        // Mixed values in and out of range (but within i16)
+        for i in 0..512 {
+            let v = (i as i32 * 19 - 42) as i32;
+            input[i] = (v % 32768) as i16;
+        }
+
+        ntt_forward_in_place(&mut input).expect("ntt_forward_in_place failed");
+        assert_all_in_range(&input);
+    }
+
+    #[test]
+    fn test_ntt_forward_in_place_matches_kat512_vectors() {
+        // KAT format: outer array of pairs [input[512], expected_output[512]].
+        // Inputs may be "dirty" (negatives / out-of-range), since the wrapper normalizes.
+        const KAT_JSON: &str = include_str!("ntt_KAT512.json");
+
+        let pairs: Vec<[Vec<i32>; 2]> =
+            serde_json::from_str(KAT_JSON).expect("failed to parse ntt_KAT512.json");
+        assert!(!pairs.is_empty(), "ntt_KAT512.json contained no vectors");
+
+        let q_i32 = FALCON_Q as i32;
+
+        for (case_idx, [input_vec, expected_vec]) in pairs.into_iter().enumerate() {
+            assert_eq!(
+                input_vec.len(),
+                FALCON_N,
+                "case {case_idx}: input length != {FALCON_N}"
+            );
+            assert_eq!(
+                expected_vec.len(),
+                FALCON_N,
+                "case {case_idx}: expected length != {FALCON_N}"
+            );
+
+            let mut a = [0i16; 512];
+            for (i, x) in input_vec.into_iter().enumerate() {
+                assert!(
+                    x >= i16::MIN as i32 && x <= i16::MAX as i32,
+                    "case {case_idx}, idx {i}: input out of i16 range: {x}"
                 );
-                assert_eq!(
-                    b,
-                    (Q - a) % Q,
-                    "{name}: expected roots[{i}+1] == Q - roots[{i}]"
-                );
+                a[i] = x as i16;
             }
-        }
 
-        /// For phi_{2^m}(x) = x^{2^(m-1)} + 1:
-        /// every listed root r should satisfy r^{2^(m-1)} = -1 (mod Q),
-        /// and therefore r^{2^m} = 1 (mod Q).
-        fn assert_phi2m_root_property(name: &str, roots: &[u16], m: u32) {
-            assert!(m >= 2, "{name}: m must be >= 2");
-            let half: u32 = 1u32 << (m - 1);
-            let full: u32 = 1u32 << m;
-
-            for (idx, &r16) in roots.iter().enumerate() {
-                let r = r16 as u32;
-                let r_half = mod_pow(r, half);
-                assert_eq!(
-                    r_half,
-                    Q - 1,
-                    "{name}: root[{idx}] fails r^(2^(m-1)) == -1 mod Q (got {r_half})"
-                );
-                let r_full = mod_pow(r, full);
-                assert_eq!(
-                    r_full,
-                    1,
-                    "{name}: root[{idx}] fails r^(2^m) == 1 mod Q (got {r_full})"
-                );
+            if let Err(e) = ntt_forward_in_place(&mut a) {
+                assert!(false, "case {case_idx}: ntt_forward_in_place returned error: {e:?}");
             }
-        }
 
-        macro_rules! check_table {
-            ($name:literal, $roots:expr, $m:expr) => {{
-                let roots: &[u16] = $roots;
-                assert_in_range_and_unique($name, roots);
-                assert_signed_pairs($name, roots);
-                assert_phi2m_root_property($name, roots, $m);
-            }};
-        }
+            for i in 0..FALCON_N {
+                let want = expected_vec[i];
+                assert!(
+                    (0..q_i32).contains(&want),
+                    "case {case_idx}, idx {i}: expected out of range: want={want}, q={q_i32}"
+                );
 
-        #[test]
-        fn test_phi4_roots_are_sqrt_minus_one() {
-            // m=2: phi_4(x)=x^2+1, so r^2 = -1
-            check_table!("PHI4_ROOTS_ZQ", &PHI4_ROOTS_ZQ, 2);
-        }
+                let got = a[i] as i32;
+                assert!(
+                    (0..q_i32).contains(&got),
+                    "case {case_idx}, idx {i}: got out of range: got={got}, q={q_i32}"
+                );
 
-        #[test]
-        fn test_phi8_roots_satisfy_x4_plus_1() {
-            // m=3: phi_8(x)=x^4+1, so r^4 = -1
-            check_table!("PHI8_ROOTS_ZQ", &PHI8_ROOTS_ZQ, 3);
-        }
-
-        #[test]
-        fn test_phi16_roots_satisfy_x8_plus_1() {
-            check_table!("PHI16_ROOTS_ZQ", &PHI16_ROOTS_ZQ, 4);
-        }
-
-        #[test]
-        fn test_phi32_roots_satisfy_x16_plus_1() {
-            check_table!("PHI32_ROOTS_ZQ", &PHI32_ROOTS_ZQ, 5);
-        }
-
-        #[test]
-        fn test_phi64_roots_satisfy_x32_plus_1() {
-            check_table!("PHI64_ROOTS_ZQ", &PHI64_ROOTS_ZQ, 6);
-        }
-
-        #[test]
-        fn test_phi128_roots_satisfy_x64_plus_1() {
-            check_table!("PHI128_ROOTS_ZQ", &PHI128_ROOTS_ZQ, 7);
-        }
-
-        #[test]
-        fn test_phi256_roots_satisfy_x128_plus_1() {
-            check_table!("PHI256_ROOTS_ZQ", &PHI256_ROOTS_ZQ, 8);
-        }
-
-        #[test]
-        fn test_phi512_roots_satisfy_x256_plus_1() {
-            check_table!("PHI512_ROOTS_ZQ", &PHI512_ROOTS_ZQ, 9);
-        }
-
-        #[test]
-        fn test_phi1024_roots_satisfy_x512_plus_1() {
-            // This is the big confidence test: r^512 == -1 and r^1024 == 1 for every entry.
-            check_table!("PHI1024_ROOTS_ZQ", &PHI1024_ROOTS_ZQ, 10);
-        }
-
-        #[test]
-        fn test_table_lengths_match_expected_phi_half_counts() {
-            // For phi_{2^m}, there are phi(2^m)=2^(m-1) primitive roots,
-            // and Falcon tables typically list the "odd powers" with ± pairing, so length is 2^(m-1).
-            assert_eq!(PHI4_ROOTS_ZQ.len(), 2);
-            assert_eq!(PHI8_ROOTS_ZQ.len(), 4);
-            assert_eq!(PHI16_ROOTS_ZQ.len(), 8);
-            assert_eq!(PHI32_ROOTS_ZQ.len(), 16);
-            assert_eq!(PHI64_ROOTS_ZQ.len(), 32);
-            assert_eq!(PHI128_ROOTS_ZQ.len(), 64);
-            assert_eq!(PHI256_ROOTS_ZQ.len(), 128);
-            assert_eq!(PHI512_ROOTS_ZQ.len(), 256);
-            assert_eq!(PHI1024_ROOTS_ZQ.len(), 512);
+                assert_eq!(got, want, "case {}, idx {}: mismatch", case_idx, i);
+            }
         }
     }
 
