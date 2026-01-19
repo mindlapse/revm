@@ -484,18 +484,40 @@ fn reduce_u32_mod_q(x: u32) -> u16 {
     r as u16
 }
 
-
+/// Pointwise multiply `a` by `b` modulo Q, in-place on `a`.
+///
+/// Intended for Falcon-512 NTT-domain Hadamard multiplication. This function keeps everything in `i16`
+/// because `normalize_in_place()` ensures coefficients are canonical residues in `[0, Q)`,
+/// and `Q = 12289 < i16::MAX`.
+///
+/// No heap allocation, no extra buffers.
 #[inline(always)]
-pub fn hadamard_mul_mod_q(out: &mut [u16; 512], a: &[u16; 512], b: &[u16; 512]) {
-    let mut tmp = [0u32; 512];
+pub(crate) fn pointwise_mul_in_place(
+    a: &mut [i16; 512],
+    b: &[i16; 512],
+) -> Result<(), FalconError> {
+    // Ensure both operands are canonical residues.
+    normalize_in_place(a);
+
+    // If you want to be extra misuse-proof, normalize a local copy of `b`.
+    // If you expect `b` is already normalized at call sites, you can skip this copy
+    // and document that precondition instead.
+    let mut b_norm = *b;
+    normalize_in_place(&mut b_norm);
 
     for i in 0..512 {
-        tmp[i] = (a[i] as u32) * (b[i] as u32);
+        // After normalization, values are in [0, Q), so these casts are safe.
+        let aa = a[i] as u32;
+        let bb = b_norm[i] as u32;
+
+        // aa*bb < (Q-1)^2 < Q^2, satisfying reduce_u32_mod_q precondition.
+        let prod = aa * bb;
+        a[i] = reduce_u32_mod_q(prod) as i16;
     }
-    for i in 0..512 {
-        out[i] = reduce_u32_mod_q(tmp[i]);
-    }
+
+    Ok(())
 }
+
 
 #[inline]
 fn add_mod_q(a: u16, b: u16) -> u16 {
@@ -2225,39 +2247,50 @@ mod tests {
     }
 
     #[test]
-    fn test_hadamard_mul_mod_q_matches_reference_mul_mod_q_on_random_arrays_512_checks() {
+    fn test_pointwise_mul_in_place_matches_reference_mul_mod_q_on_random_arrays() {
         let mut rng = XorShift64::new(0xD00D_F00D_BA5E_CAFE);
 
         for iter in 0..256 {
-            let mut a = [0u16; 512];
-            let mut b = [0u16; 512];
+            let mut a_u16 = [0u16; 512];
+            let mut b_u16 = [0u16; 512];
 
             for i in 0..512 {
-                a[i] = rng.next_u16_mod_q();
-                b[i] = rng.next_u16_mod_q();
+                a_u16[i] = rng.next_u16_mod_q();
+                b_u16[i] = rng.next_u16_mod_q();
             }
 
+            // Reference (u16) output using the simple `% Q` multiply.
             let mut out_ref = [0u16; 512];
-            let mut out_fast = [0u16; 512];
-
             for i in 0..512 {
-                out_ref[i] = mul_mod_q(a[i], b[i]);
+                out_ref[i] = mul_mod_q(a_u16[i], b_u16[i]);
             }
 
-            hadamard_mul_mod_q(&mut out_fast, &a, &b);
+            // Fast path uses i16 vectors (matches ntt/intt representation).
+            let mut a_i16 = [0i16; 512];
+            let mut b_i16 = [0i16; 512];
+            for i in 0..512 {
+                a_i16[i] = a_u16[i] as i16;
+                b_i16[i] = b_u16[i] as i16;
+            }
 
-            assert_eq!(out_fast, out_ref, "hadamard mismatch at iteration {iter}");
+            pointwise_mul_in_place(&mut a_i16, &b_i16).unwrap();
 
-            // Extra invariant check: ensure every coefficient is in [0,Q).
-            for (j, &v) in out_fast.iter().enumerate() {
+            // Compare modulo-Q, lane by lane, and check range.
+            for i in 0..512 {
+                let got = a_i16[i] as i32;
                 assert!(
-                    (v as u32) < Q,
-                    "hadamard produced out-of-range at iter={iter}, idx={j}, v={v}"
+                    (0..(Q as i32)).contains(&got),
+                    "pointwise_mul_in_place produced out-of-range at iter={iter}, idx={i}, v={got}"
+                );
+
+                assert_eq!(
+                    got as u16,
+                    out_ref[i],
+                    "pointwise_mul_in_place mismatch at iter={iter}, idx={i}"
                 );
             }
         }
     }
-
 
     #[inline]
     fn norm_q(x: u16) -> u16 {
