@@ -458,6 +458,45 @@ fn stage_unmerge_from_interleaved(dst: &mut [u16; N], src: &[u16; N], half: usiz
     }
 }
 
+// FALCON_Q as a u32
+const Q: u32 = 12289;
+
+// MU = floor(2^32 / Q)
+const MU: u32 = ((1u64 << 32) / (Q as u64)) as u32;
+
+#[inline(always)]
+/// Returns x mod Q, without needing to use the modulus operator
+/// Precondition: x < Q^2 (true for (u16 mod Q) * (u16 mod Q)); fix-up uses at most two subtracts under this bound.
+fn reduce_u32_mod_q(x: u32) -> u16 {
+    // qhat = floor(x * MU / 2^32)
+    let qhat = ((x as u64 * MU as u64) >> 32) as u32;
+
+    // r = x - qhat*Q, computed in u32 since x < 2^28 and qhat is small
+    // Since MU <= 2^32 / Q, then x * MU / 2^32 <= x / Q, so qhat <= floor(x / Q).
+    // That means qhat * Q <= x, so x - qhat*Q cannot underflow
+    let mut r = x - qhat * Q;
+
+    // r may still be >= Q, but close enough to reach it with at most two subtractions
+    if r >= Q { r -= Q; }
+    if r >= Q { r -= Q; }
+    debug_assert!(r < Q);
+
+    r as u16
+}
+
+
+#[inline(always)]
+pub fn hadamard_mul_mod_q(out: &mut [u16; 512], a: &[u16; 512], b: &[u16; 512]) {
+    let mut tmp = [0u32; 512];
+
+    for i in 0..512 {
+        tmp[i] = (a[i] as u32) * (b[i] as u32);
+    }
+    for i in 0..512 {
+        out[i] = reduce_u32_mod_q(tmp[i]);
+    }
+}
+
 #[inline]
 fn add_mod_q(a: u16, b: u16) -> u16 {
     let q = FALCON_Q as u32;
@@ -2052,5 +2091,307 @@ mod tests {
             back, ntt0,
             "ntt(intt(NTT)) must equal original canonical NTT"
         );
+    }
+
+
+    #[inline]
+    fn oracle_mod_q(x: u32) -> u16 {
+        (x % Q) as u16
+    }
+
+    #[test]
+    fn test_reduce_u32_mod_q_edge_cases_matches_modulus_oracle() {
+        let qq = Q as u64;
+
+        // Exact small / boundary values around Q
+        let cases: [u32; 13] = [
+            0,
+            1,
+            Q - 1,
+            Q,
+            Q + 1,
+            2 * Q - 1,
+            2 * Q,
+            2 * Q + 1,
+            3 * Q - 1,
+            3 * Q,
+            3 * Q + 1,
+            4 * Q - 1,
+            4 * Q,
+        ];
+
+        for &x in &cases {
+            assert_eq!(
+                reduce_u32_mod_q(x),
+                oracle_mod_q(x),
+                "mismatch at x={x}"
+            );
+        }
+
+        // Max and near-max products under the precondition x < Q^2
+        let max_prod = ((Q - 1) as u64) * ((Q - 1) as u64); // (Q-1)^2
+        let near_1 = ((Q - 1) as u64) * ((Q - 2) as u64);
+        let near_2 = ((Q - 2) as u64) * ((Q - 2) as u64);
+
+        for (label, x64) in [
+            ("(Q-1)^2", max_prod),
+            ("(Q-1)(Q-2)", near_1),
+            ("(Q-2)^2", near_2),
+        ] {
+            assert!(x64 < qq * qq, "{label} violates x < Q^2");
+            let x = x64 as u32;
+            assert_eq!(
+                reduce_u32_mod_q(x),
+                oracle_mod_q(x),
+                "mismatch at {label} (x={x})"
+            );
+        }
+    }
+
+    #[inline]
+    fn sweep_band(start: u32, end_exclusive: u32, step: u32) {
+        assert!(step != 0);
+        let mut x = start;
+
+        while x < end_exclusive {
+            let got = reduce_u32_mod_q(x);
+            let want = oracle_mod_q(x);
+            assert_eq!(got, want, "mismatch at x={x} (start={start}, end={end_exclusive}, step={step})");
+            x = x.saturating_add(step);
+            if x == u32::MAX {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_reduce_u32_mod_q_structured_sweep_bands_match_modulus_oracle() {
+        // We only need to cover the intended precondition range.
+        // Here, end_max is the maximum x that can arise from (u16 mod Q)*(u16 mod Q).
+        let q2 = (Q as u64) * (Q as u64);
+        let end_max_inclusive = ((Q - 1) as u64) * ((Q - 1) as u64);
+        assert!(end_max_inclusive < q2);
+
+        let end_max_exclusive = (end_max_inclusive as u32).saturating_add(1);
+
+        // Band A: small region where fix-up behavior is most visible
+        // [0, 4Q)
+        sweep_band(0, 4 * Q, 1);
+        sweep_band(0, 4 * Q, 7);
+        sweep_band(0, 4 * Q, 97);
+
+        // Band B: around Q^2/2 (interior)
+        // Choose a window of +/- 2Q around mid, then sample with a stride.
+        let mid = ((q2 / 2) as u32).min(end_max_exclusive - 1);
+        let lo = mid.saturating_sub(2 * Q);
+        let hi = (mid.saturating_add(2 * Q)).min(end_max_exclusive);
+
+        sweep_band(lo, hi, 13);
+        sweep_band(lo, hi, 257);
+
+        // Band C: near the top end [Q^2 - 4Q, Q^2) but capped to the true max under the precondition.
+        // Since our actual max is (Q-1)^2, sweep the last ~4Q values before that.
+        let top = end_max_exclusive;
+        let lo_top = top.saturating_sub(4 * Q);
+
+        sweep_band(lo_top, top, 1);
+        sweep_band(lo_top, top, 19);
+        sweep_band(lo_top, top, 509);
+    }
+
+
+    #[test]
+    fn test_reduce_u32_mod_q_random_pairs_matches_modulus_oracle_512_checks() {
+        let mut rng = XorShift64::new(0xBADC0FFE_EE0DDF00);
+
+        for i in 0..512 {
+            let a = rng.next_u16_mod_q() as u32;
+            let b = rng.next_u16_mod_q() as u32;
+            let x = a * b;
+
+            let r = reduce_u32_mod_q(x);
+            assert!(
+                (r as u32) < Q,
+                "reducer returned out-of-range value at iter={i}: r={r}, x={x}, a={a}, b={b}"
+            );
+
+            // And still matches the oracle (this keeps the test from being "range only")
+            assert_eq!(
+                r,
+                oracle_mod_q(x),
+                "oracle mismatch at iter={i}: r={r}, x={x}, a={a}, b={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hadamard_mul_mod_q_matches_reference_mul_mod_q_on_random_arrays_512_checks() {
+        let mut rng = XorShift64::new(0xD00D_F00D_BA5E_CAFE);
+
+        for iter in 0..256 {
+            let mut a = [0u16; 512];
+            let mut b = [0u16; 512];
+
+            for i in 0..512 {
+                a[i] = rng.next_u16_mod_q();
+                b[i] = rng.next_u16_mod_q();
+            }
+
+            let mut out_ref = [0u16; 512];
+            let mut out_fast = [0u16; 512];
+
+            for i in 0..512 {
+                out_ref[i] = mul_mod_q(a[i], b[i]);
+            }
+
+            hadamard_mul_mod_q(&mut out_fast, &a, &b);
+
+            assert_eq!(out_fast, out_ref, "hadamard mismatch at iteration {iter}");
+
+            // Extra invariant check: ensure every coefficient is in [0,Q).
+            for (j, &v) in out_fast.iter().enumerate() {
+                assert!(
+                    (v as u32) < Q,
+                    "hadamard produced out-of-range at iter={iter}, idx={j}, v={v}"
+                );
+            }
+        }
+    }
+
+
+    #[inline]
+    fn norm_q(x: u16) -> u16 {
+        // If your NTT/INTT already maintain [0,Q), you can omit this,
+        // but leaving it makes the test robust to minor implementation choices.
+        if (x as u32) >= Q { ((x as u32) % Q) as u16 } else { x }
+    }
+
+
+    /// Map any i16 to a canonical residue in [0, Q) as u16.
+    /// This is the equality notion we care about for NTT/INTT roundtrips.
+    #[inline]
+    fn canon_mod_q(x: i16) -> u16 {
+        let q = FALCON_Q as i32;
+        let mut v = x as i32 % q;
+        if v < 0 {
+            v += q;
+        }
+        v as u16
+    }
+
+    /// Assert two i16 coefficient vectors are equal modulo Q, coefficient-wise.
+    #[inline]
+    fn assert_eq_mod_q(a: &[i16; 512], b: &[i16; 512], ctx: &str) {
+        for i in 0..512 {
+            let aa = canon_mod_q(a[i]);
+            let bb = canon_mod_q(b[i]);
+            assert_eq!(
+                aa, bb,
+                "{ctx}: mismatch at idx={i}: a[i]={} (modQ={aa}), b[i]={} (modQ={bb})",
+                a[i], b[i]
+            );
+        }
+    }
+
+    /// Roundtrip: intt(ntt(x)) == x (mod Q), for many random vectors in [0, Q).
+    #[test]
+    fn ntt_intt_roundtrip_random_vectors_in_0_to_q() {
+        let q = FALCON_Q as u64;
+        let mut rng = XorShift64::new(0xC0FF_EE00);
+
+        // "Many": 100 independent random vectors, each 512 coefficients.
+        for iter in 0..100 {
+            let mut a = [0i16; 512];
+            for i in 0..512 {
+                a[i] = (rng.next_u64() % q) as i16; // in [0, Q)
+            }
+
+            let orig = a;
+
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+
+            assert_eq_mod_q(&a, &orig, &format!("roundtrip [0,Q) iter={iter}"));
+        }
+    }
+
+    /// Roundtrip: intt(ntt(x)) == x (mod Q), for many random vectors spanning full i16 range.
+    /// This exercises the normalization path in `ntt()` and any sign handling.
+    #[test]
+    fn ntt_intt_roundtrip_random_vectors_wide_i16() {
+        let mut rng = XorShift64::new(0xFEED_FACE_D00D_BEEF);
+
+        for iter in 0..100 {
+            let mut a = [0i16; 512];
+            for i in 0..512 {
+                a[i] = rng.next_i16_wide(); // includes negatives
+            }
+
+            let orig = a;
+
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+
+            assert_eq_mod_q(&a, &orig, &format!("roundtrip wide-i16 iter={iter}"));
+        }
+    }
+
+    /// A couple of structured edge patterns to catch "looks random-proof but fails on structure".
+    #[test]
+    fn ntt_intt_roundtrip_structured_vectors() {
+        let q = FALCON_Q as i16;
+
+        // All zeros
+        {
+            let mut a = [0i16; 512];
+            let orig = a;
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+            assert_eq_mod_q(&a, &orig, "structured all-zero");
+        }
+
+        // All (Q-1)
+        {
+            let mut a = [q - 1; 512];
+            let orig = a;
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+            assert_eq_mod_q(&a, &orig, "structured all-(Q-1)");
+        }
+
+        // Alternating 0 / (Q-1)
+        {
+            let mut a = [0i16; 512];
+            for i in 0..512 {
+                a[i] = if (i & 1) == 0 { 0 } else { q - 1 };
+            }
+            let orig = a;
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+            assert_eq_mod_q(&a, &orig, "structured alternating");
+        }
+
+        // Ramp: i mod Q, plus a negative ramp to hit both signs deterministically
+        {
+            let mut a = [0i16; 512];
+            for i in 0..512 {
+                a[i] = (i as i16) % q;
+            }
+            let orig = a;
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+            assert_eq_mod_q(&a, &orig, "structured ramp");
+        }
+
+        {
+            let mut a = [0i16; 512];
+            for i in 0..512 {
+                a[i] = -((i as i16) % q);
+            }
+            let orig = a;
+            ntt(&mut a).unwrap();
+            intt(&mut a).unwrap();
+            assert_eq_mod_q(&a, &orig, "structured negative-ramp");
+        }
     }
 }
