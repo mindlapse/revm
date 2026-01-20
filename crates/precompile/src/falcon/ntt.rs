@@ -73,7 +73,7 @@ pub(crate) fn ntt_with_stages_and_normalized(
 /// Normalize all coefficients into canonical residues in [0, q).
 /// Fixed bound loop; no allocation; no panics.
 #[inline]
-fn normalize_in_place(a: &mut [i16; 512]) {
+pub(crate) fn normalize_in_place(a: &mut [i16; 512]) {
     let q: i32 = FALCON_Q as i32;
     for x in a.iter_mut() {
         // Normalization is outside the NTT hot loop; a per-coefficient `% q` is acceptable
@@ -477,8 +477,12 @@ fn reduce_u32_mod_q(x: u32) -> u16 {
     let mut r = x - qhat * Q;
 
     // r may still be >= Q, but close enough to reach it with at most two subtractions
-    if r >= Q { r -= Q; }
-    if r >= Q { r -= Q; }
+    if r >= Q {
+        r -= Q;
+    }
+    if r >= Q {
+        r -= Q;
+    }
     debug_assert!(r < Q);
 
     r as u16
@@ -517,7 +521,6 @@ pub(crate) fn pointwise_mul_in_place(
 
     Ok(())
 }
-
 
 #[inline]
 fn add_mod_q(a: u16, b: u16) -> u16 {
@@ -2115,7 +2118,6 @@ mod tests {
         );
     }
 
-
     #[inline]
     fn oracle_mod_q(x: u32) -> u16 {
         (x % Q) as u16
@@ -2143,11 +2145,7 @@ mod tests {
         ];
 
         for &x in &cases {
-            assert_eq!(
-                reduce_u32_mod_q(x),
-                oracle_mod_q(x),
-                "mismatch at x={x}"
-            );
+            assert_eq!(reduce_u32_mod_q(x), oracle_mod_q(x), "mismatch at x={x}");
         }
 
         // Max and near-max products under the precondition x < Q^2
@@ -2178,7 +2176,10 @@ mod tests {
         while x < end_exclusive {
             let got = reduce_u32_mod_q(x);
             let want = oracle_mod_q(x);
-            assert_eq!(got, want, "mismatch at x={x} (start={start}, end={end_exclusive}, step={step})");
+            assert_eq!(
+                got, want,
+                "mismatch at x={x} (start={start}, end={end_exclusive}, step={step})"
+            );
             x = x.saturating_add(step);
             if x == u32::MAX {
                 break;
@@ -2220,7 +2221,6 @@ mod tests {
         sweep_band(lo_top, top, 19);
         sweep_band(lo_top, top, 509);
     }
-
 
     #[test]
     fn test_reduce_u32_mod_q_random_pairs_matches_modulus_oracle_512_checks() {
@@ -2284,8 +2284,7 @@ mod tests {
                 );
 
                 assert_eq!(
-                    got as u16,
-                    out_ref[i],
+                    got as u16, out_ref[i],
                     "pointwise_mul_in_place mismatch at iter={iter}, idx={i}"
                 );
             }
@@ -2296,9 +2295,12 @@ mod tests {
     fn norm_q(x: u16) -> u16 {
         // If your NTT/INTT already maintain [0,Q), you can omit this,
         // but leaving it makes the test robust to minor implementation choices.
-        if (x as u32) >= Q { ((x as u32) % Q) as u16 } else { x }
+        if (x as u32) >= Q {
+            ((x as u32) % Q) as u16
+        } else {
+            x
+        }
     }
-
 
     /// Map any i16 to a canonical residue in [0, Q) as u16.
     /// This is the equality notion we care about for NTT/INTT roundtrips.

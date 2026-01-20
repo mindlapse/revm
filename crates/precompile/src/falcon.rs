@@ -98,6 +98,12 @@ pub const SIGNATURE_LEN_UNPACKED: usize = FALCON_N;
 /// Bit width used to encode Falcon coefficients (14 bits per coefficient).
 const COEFF_BITS: u32 = 14;
 
+/// Falcon-512 acceptance bound (beta^2) from the EIP-8052 Falcon core algorithm.
+///
+/// The EIP specifies the check as:
+///     ||(s1, s2)||_2^2 < floor(beta^2)
+const ACCEPTANCE_BOUND_BETA2: i64 = 34_034_726;
+
 /// Compile-time enforcement that SIG_LEN = SALT_LEN + S2_COMPRESSED_LEN
 const _: [(); SIG_LEN] = [(); SALT_LEN + S2_COMPRESSED_LEN];
 

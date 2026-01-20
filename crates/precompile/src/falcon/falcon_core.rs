@@ -10,9 +10,11 @@ use crate::{
     falcon::{
         encoding::{self, unpack_falcon_14bit_be_polynomial},
         error::FalconError,
+        ntt::{intt, normalize_in_place, ntt, pointwise_mul_in_place},
         sig_reader::SigReader,
         utils::map_falcon_result,
-        UnpackedPublicKey, UnpackedSignature, FALCON_CORE_VERIFY_GAS, FALCON_N,
+        UnpackedPublicKey, UnpackedSignature, ACCEPTANCE_BOUND_BETA2, FALCON_CORE_VERIFY_GAS,
+        FALCON_N, FALCON_Q,
     },
     utilities::bool_to_bytes32,
     PrecompileError, PrecompileOutput, PrecompileResult,
@@ -36,11 +38,130 @@ fn verify(input: &[u8]) -> Result<PrecompileOutput, FalconError> {
 }
 
 pub(crate) fn falcon_core_verify(
-    _sig: &UnpackedSignature,
-    _pk: &UnpackedPublicKey,
-    _challenge: &UnpackedChallenge,
+    sig: &UnpackedSig,
+    pubkey_ntt: &UnpackedPk, // NOTE: This is `h` already in NTT domain, packed as 14-bit coeffs.
+    challenge: &UnpackedChallenge,
 ) -> Result<bool, FalconError> {
-    Ok(true) // TODO
+    // --- Step 0: Canonicality checks (defense in depth) ---
+    //
+    // unpack_falcon_14bit_be_polynomial() should already reject coefficients >= Q,
+    // but keep the invariants local and obvious.
+    for &c in pubkey_ntt.iter() {
+        if c >= FALCON_Q {
+            return Ok(false);
+        }
+    }
+    for &c in challenge.iter() {
+        if c >= FALCON_Q {
+            return Ok(false);
+        }
+    }
+
+    // --- Step 1: Prepare s2 (signature vector) ---
+    //
+    // SigReader yields signed coefficients (i32). For the NTT pipeline we use i16.
+    // Reject if any coefficient cannot be represented as i16.
+    let mut s2 = [0i16; FALCON_N];
+    for i in 0..FALCON_N {
+        let v = sig[i];
+        if v < i16::MIN as i32 || v > i16::MAX as i32 {
+            return Err(FalconError::InvalidSignatureEncoding);
+        }
+        s2[i] = v as i16;
+    }
+
+    // Preserve the original signed s2 for the norm check (spec squares s2 as-is).
+    let s2_for_norm = sig;
+
+    // --- Step 2: Convert s2 to evaluation domain (NTT) ---
+    //
+    // Spec: s2_ntt = ntt(s2)
+    let mut s2_ntt = s2;
+    ntt(&mut s2_ntt)?;
+
+    // --- Step 3: Compute tmp_ntt = hadamard_product(s2_ntt, h) ---
+    //
+    // Spec: h is already in NTT domain. DO NOT call ntt(h) here.
+    let mut h_ntt = [0i16; FALCON_N];
+    for i in 0..FALCON_N {
+        // safe because pubkey_ntt[i] < Q < i16::MAX
+        h_ntt[i] = pubkey_ntt[i] as i16;
+    }
+
+    // Pointwise multiply in-place on s2_ntt: s2_ntt[i] = s2_ntt[i] * h_ntt[i] (mod Q).
+    // This function should normalize internally, so it is robust even if s2_ntt contains
+    // negative representatives at any point.
+    pointwise_mul_in_place(&mut s2_ntt, &h_ntt)?;
+
+    // --- Step 4: tmp = intt(tmp_ntt) ---
+    //
+    // Spec: tmp = intt(tmp_ntt), coefficient form modulo q.
+    intt(&mut s2_ntt)?;
+
+    // IMPORTANT: ensure tmp is in canonical residues [0, Q) before subtracting from challenge.
+    // If `intt()` already guarantees this, this is redundant but harmless and clarifies intent.
+    normalize_in_place(&mut s2_ntt);
+
+    // At this point, `s2_ntt` holds tmp in canonical [0,Q) (stored as i16).
+
+    // --- Step 5: s1 = challenge - tmp (mod Q), then center to [-Q/2, Q/2] ---
+    //
+    // Spec:
+    //     s1 = challenge - tmp
+    //     s1 = normalize_coefficients(s1, q)  (i.e. center)
+    let mut s1_centered = [0i16; FALCON_N];
+    for i in 0..FALCON_N {
+        let c = challenge[i] as i16; // canonical [0,Q)
+        let t = s2_ntt[i]; // canonical [0,Q)
+        let s1_can = sub_mod_q_i16(c, t); // canonical [0,Q)
+        s1_centered[i] = center_mod_q(s1_can);
+    }
+
+    // --- Step 6: Norm bound check ---
+    //
+    // Spec: total_norm = sum(s1^2) + sum(s2^2), return total_norm < ACCEPTANCE_BOUND.
+    let mut acc: i64 = 0;
+    for i in 0..FALCON_N {
+        let s1 = s1_centered[i] as i64;
+        let s2 = s2_for_norm[i] as i64;
+
+        acc += s1 * s1;
+        acc += s2 * s2;
+
+        // Deterministic early exit.
+        if acc >= ACCEPTANCE_BOUND_BETA2 {
+            return Ok(false);
+        }
+    }
+
+    Ok(acc < ACCEPTANCE_BOUND_BETA2)
+}
+
+/// Forward-compatible helper: center a canonical residue in [0, Q) into [-Q/2, Q/2].
+///
+/// For Falcon q=12289 (odd), Q/2 is 6144 (floor), so the result is in [-6144, 6144].
+#[inline(always)]
+fn center_mod_q(x: i16) -> i16 {
+    debug_assert!((0..(FALCON_Q as i16)).contains(&x));
+    let half_q: i16 = (FALCON_Q as i16) / 2;
+    if x > half_q {
+        x - (FALCON_Q as i16)
+    } else {
+        x
+    }
+}
+
+/// Subtract in Z_q given canonical residues a,b in [0,Q):
+/// returns (a-b) mod Q, still canonical in [0,Q).
+#[inline(always)]
+fn sub_mod_q_i16(a: i16, b: i16) -> i16 {
+    debug_assert!((0..(FALCON_Q as i16)).contains(&a));
+    debug_assert!((0..(FALCON_Q as i16)).contains(&b));
+    let mut d = a - b;
+    if d < 0 {
+        d += FALCON_Q as i16;
+    }
+    d
 }
 
 type UnpackedSig = [i32; FALCON_N];
@@ -68,7 +189,7 @@ mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
     use crate::falcon::utils::test::{
-        bits_to_buf, push_coeff, sample_14bit_coeff, set_coeff_14bit_be,
+        bits_to_buf, push_coeff, sample_14bit_coeff, set_coeff_14bit_packed,
     };
     use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, S2_COMPRESSED_LEN, SIG_LEN};
     use rand::rngs::StdRng;
@@ -201,9 +322,9 @@ mod tests {
         let mut challenge_packed = pack_falcon_14bit_be_polynomial(&challenge_coeffs).unwrap();
 
         // Corrupt one challenge coefficient after packing: set it to Q (invalid: must be < Q).
-        set_coeff_14bit_be(challenge_packed.as_mut(), 123, FALCON_Q);
+        set_coeff_14bit_packed(challenge_packed.as_mut(), 123, FALCON_Q);
         // Padding must remain canonical.
-        assert_eq!(challenge_packed[CHALLENGE_LEN - 1], 0);
+        assert_eq!(challenge_packed[0], 0);
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);
