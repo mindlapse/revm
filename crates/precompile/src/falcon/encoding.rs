@@ -116,17 +116,18 @@ pub(super) fn split_sig(
 
 /// Unpack a packed 14-bit big-endian Falcon polynomial into 512 coefficients,
 /// validating each coefficient is < q. Also enforces canonical padding if present.
-/// The first coefficient is found in the least significant 14 bits of input.
-/// The input is left-padded with 0s to 897 bytes.  The first byte is always 0.
 ///
 /// Layout:
 /// - 512 coefficients × 14 bits = 7168 bits = 896 bytes of coefficient data.
-/// - The first 8 bits (byte 0) is a zero.
+/// - If `input_len` is 897, the final byte is padding and must be 0.
 #[inline]
 pub(super) fn unpack_falcon_14bit_be_polynomial(
     input: &PackedFalconPolynomial,
 ) -> Result<[u16; FALCON_N], FalconError> {
-    const COEFF_BITS: u32 = 14;
+    // You can use this helper for both public key and challenge bits without duplicating logic.
+
+    // Determine how many bytes actually carry coefficient bits.
+    // 512*14 bits = 896 bytes exactly.
     const COEFF_BYTES: usize = (FALCON_N * COEFF_BITS as usize) / 8; // 896
 
     // Compile-time invariants
@@ -134,29 +135,43 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
     const _: () = assert!(COEFF_BYTES == 896);
 
     // If there is a padding byte, require it to be zero for canonical encoding.
-    if input[0] != 0 {
+    if input[COEFF_BYTES] != 0 {
         return Err(FalconError::InvalidFieldElement);
     }
 
     let mut out = [0u16; FALCON_N];
 
-    // Accumulator holds low-order bits; acc_bits is how many valid low bits are in `acc`.
-    // We only ever need up to (14-1)+8 = 21 bits to safely extract a 14-bit chunk, so u32 is plenty.
     let mut acc: u32 = 0;
     let mut acc_bits: u32 = 0;
     let mut out_i: usize = 0;
 
-    // Decode only the 896 data bytes; walk from least-significant byte to most-significant byte.
-    for &b in input[1..].iter().rev() {
-        acc |= (b as u32) << acc_bits;
+    // Helper: keep only the lowest `bits` bits of `x`.
+    #[inline(always)]
+    fn low_mask_u32(x: u32, bits: u32) -> u32 {
+        match bits {
+            0 => 0,
+            // In this algorithm `bits` never reaches 32, but this helps keep everyone calm.
+            32 => x,
+            _ => x & ((1u32 << bits) - 1),
+        }
+    }
+
+    let (coeff_bytes, _pad) = input.split_at(COEFF_BYTES as usize);
+
+    for &b in coeff_bytes {
+        acc = (acc << 8) | (b as u32);
         acc_bits += 8;
 
         while acc_bits >= COEFF_BITS && out_i < FALCON_N {
-            let v = acc & ((1u32 << COEFF_BITS) - 1);
-            acc >>= COEFF_BITS;
+            let shift = acc_bits - COEFF_BITS;
+            let v = acc >> shift;
             acc_bits -= COEFF_BITS;
 
-            if v >= FALCON_Q as u32 {
+            // Keep only the remaining lower acc_bits bits.
+            acc = low_mask_u32(acc, acc_bits);
+
+            // Range check - ensure each polynomial coefficient is strictly less than Q = 12289
+            if v >= (FALCON_Q as u32) {
                 return Err(FalconError::InvalidFieldElement);
             }
 
@@ -165,11 +180,14 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
         }
     }
 
+    // Must have produced exactly 512 coefficients.
+    // If not, the input was malformed (shouldn't happen with fixed lengths, defensive only)
     if out_i != FALCON_N {
         return Err(FalconError::InternalEncoding);
     }
 
-    // After extracting exactly 512 coefficients from 896 bytes, there should be no leftover bits.
+    // Also ensure we didn't have leftover bits that imply non-canonical encoding.
+    // With 896 bytes and 14-bit chunks, acc_bits should end at 0 exactly.
     if acc_bits != 0 {
         return Err(FalconError::InternalEncoding);
     }
@@ -180,63 +198,56 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
 pub(super) fn pack_falcon_14bit_be_polynomial(
     coeffs: &[u16; FALCON_N],
 ) -> Result<Box<PackedFalconPolynomial>, FalconError> {
-    const COEFF_BITS: usize = 14;
-    const BITS_TO_WRITE: usize = FALCON_N * COEFF_BITS; // 512 * 14 = 7168
-    const DATA_BYTES: usize = BITS_TO_WRITE / 8; // 896
+    const BITS_TO_WRITE: usize = FALCON_N * COEFF_BITS as usize;
+    const BYTES_TO_WRITE: usize = BITS_TO_WRITE / 8;
 
-    // Compile-time invariants
+    // Compile-time invariants (evalutated during const evaluation and not at runtime)
     const _: () = assert!(BITS_TO_WRITE % 8 == 0);
-    const _: () = assert!(DATA_BYTES == 896);
-    const _: () = assert!(DATA_BYTES + 1 == CHALLENGE_LEN); // 897
+    const _: () = assert!(BYTES_TO_WRITE + 1 == CHALLENGE_LEN);
 
-    let mut out = Box::new([0u8; DATA_BYTES + 1]);
-    out[0] = 0; // canonical left-pad byte
+    let mut out = Box::new([0u8; BYTES_TO_WRITE + 1]);
+    let out_writable = &mut out[..BYTES_TO_WRITE];
+    let mut bits_written = 0;
 
-    // We'll fill out[1..] as a big-endian byte string by writing LSB-first into the tail.
-    // byte_pos points at the next location to write (moving backwards).
-    let mut byte_pos: usize = DATA_BYTES; // last index (896). We'll write down to 1 inclusive.
+    for c in 0..FALCON_N {
+        let val = coeffs[c];
+        let mut acc = val;
+        let mut acc_bits = COEFF_BITS as usize;
 
-    // Accumulator holds low-order bits not yet flushed into bytes.
-    let mut acc: u32 = 0;
-    let mut acc_bits: usize = 0;
-
-    for &val in coeffs.iter() {
         if val as u32 >= FALCON_Q as u32 {
             return Err(FalconError::InvalidFieldElement);
         }
 
-        // Append 14 bits (least-significant limb first), matching Python's `<< (14*i)`.
-        acc |= (val as u32) << acc_bits;
-        acc_bits += COEFF_BITS;
+        while acc_bits > 0 {
+            let byte_pos: usize = bits_written / 8;
 
-        // Flush full bytes from the bottom of acc into output tail.
-        while acc_bits >= 8 {
-            let byte = (acc & 0xFF) as u8;
-
-            // We must only write into indices 1..=896.
-            if byte_pos == 0 {
-                return Err(FalconError::InternalEncoding);
+            let bit_offset: usize = bits_written % 8;
+            let mut take = 8 - bit_offset;
+            if take > acc_bits {
+                take = acc_bits;
             }
+            let write_bits: u8 = (acc >> (acc_bits - take)) as u8;
 
-            out[byte_pos] = byte;
-            byte_pos -= 1;
+            let left_shift = (8 - bit_offset) - take;
 
-            acc >>= 8;
-            acc_bits -= 8;
+            // panic-free index access
+            let dst = out_writable
+                .get_mut(byte_pos)
+                .ok_or(FalconError::InternalEncoding)?;
+            *dst |= write_bits << left_shift;
+
+            acc_bits -= take;
+            if acc_bits > 0 {
+                acc &= (1u16 << acc_bits) - 1;
+            } else {
+                acc = 0;
+            }
+            bits_written += take;
         }
     }
-
-    // With 512*14 bits, we should end exactly on a byte boundary.
-    if acc_bits != 0 || acc != 0 {
+    if bits_written != BITS_TO_WRITE || out[CHALLENGE_LEN - 1] != 0 {
         return Err(FalconError::InternalEncoding);
     }
-
-    // We should have filled exactly 896 data bytes (indices 1..=896),
-    // leaving byte_pos == 0 and out[0] == 0.
-    if byte_pos != 0 || out[0] != 0 {
-        return Err(FalconError::InternalEncoding);
-    }
-
     Ok(out)
 }
 
@@ -546,7 +557,7 @@ mod tests {
 
             set_coeff_14bit_packed(&mut polynomial, i, FALCON_Q);
             // Padding must remain canonical.
-            assert_eq!(polynomial[0], 0);
+            assert_eq!(polynomial[CHALLENGE_LEN - 1], 0);
 
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
@@ -567,12 +578,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unpack_falcon_14bit_be_polynomial_invalid_if_first_byte_nonzero() {
+    fn test_unpack_falcon_14bit_be_polynomial_invalid_if_last_byte_nonzero() {
         let mut rng = rand::rng();
         for _ in 0..128 {
             let coeffs = create_sample_falcon_coefficients();
             let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
-            polynomial[0] = rng.random_range(1..255);
+            polynomial[896] = rng.random_range(1..255);
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
         }

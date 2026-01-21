@@ -324,7 +324,7 @@ mod tests {
         // Corrupt one challenge coefficient after packing: set it to Q (invalid: must be < Q).
         set_coeff_14bit_packed(challenge_packed.as_mut(), 123, FALCON_Q);
         // Padding must remain canonical.
-        assert_eq!(challenge_packed[0], 0);
+        assert_eq!(challenge_packed[CHALLENGE_LEN - 1], 0);
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);

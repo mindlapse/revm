@@ -149,11 +149,7 @@ pub(in crate::falcon) mod test {
         }
     }
 
-    /// Overwrite the 14-bit big-endian coefficient at `coeff_index` in-place.
-    /// - buf is 897 bytes
-    /// - buf[0] is the canonical left-pad byte (must remain 0)
-    /// - coefficient i is stored at bit offset 14*i from the *LSB* of the integer,
-    ///   and the integer is encoded as big-endian bytes in buf[1..].
+    // Overwrite the 14-bit big-endian coefficient at `coeff_index` in-place.
     pub(in crate::falcon) fn set_coeff_14bit_packed(
         buf: &mut [u8; CHALLENGE_LEN],
         coeff_index: usize,
@@ -161,35 +157,14 @@ pub(in crate::falcon) mod test {
     ) {
         debug_assert!(coeff_index < FALCON_N);
         debug_assert!((val as u32) < (1u32 << COEFF_BITS));
-        debug_assert!(buf[0] == 0); // keep tests honest
 
-        const COEFF_BITS_USIZE: usize = COEFF_BITS as usize;
-        const DATA_BYTES: usize = CHALLENGE_LEN - 1; // 896
-
-        // Bit position from the LSB of the integer.
-        let bit_pos = coeff_index * COEFF_BITS_USIZE;
-
-        // We will write the 14 bits of `val` into the data region buf[1..],
-        // mapping integer bit 0 to the LSB of the last data byte.
-        for j in 0..COEFF_BITS_USIZE {
-            // Take bit j of val (LSB-first) because bit_pos counts from the LSB of the integer.
-            let bit = ((val >> j) & 1) as u8;
-
-            let global = bit_pos + j; // bit index from integer LSB
-            let byte_from_lsb = global / 8; // which byte (counting from LSB end)
-            let bit_in_byte = global % 8; // which bit within that byte (0 = LSB)
-
-            // Map to big-endian byte array index inside buf[1..]:
-            // LSB byte of the integer is the *last* byte of buf[1..].
-            let byte_index_in_data = (DATA_BYTES - 1) - byte_from_lsb;
-
-            // buf[1..] starts at offset 1 in the full buffer.
-            let byte_index = 1 + byte_index_in_data;
-
-            // Within a byte, big-endian convention means:
-            // bit_in_byte=0 (LSB of integer) corresponds to bit 0 (LSB) of the byte,
-            // which is mask 1<<0.
-            let mask = 1u8 << bit_in_byte;
+        let bit_pos = coeff_index * (COEFF_BITS as usize);
+        for j in 0..(COEFF_BITS as usize) {
+            let bit = ((val >> ((COEFF_BITS as usize - 1) - j)) & 1) as u8;
+            let global = bit_pos + j;
+            let byte_index = global / 8;
+            let bit_in_byte = global % 8;
+            let mask = 1u8 << (7 - bit_in_byte);
 
             if bit == 1 {
                 buf[byte_index] |= mask;
