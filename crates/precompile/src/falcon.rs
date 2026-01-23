@@ -113,6 +113,9 @@ pub type PackedFalconPolynomial = [u8; PACKED_POLY_LEN];
 /// The unpacked form of the signature, as 512 i32 coefficients.
 pub type UnpackedSignature = [i32; SIGNATURE_LEN_UNPACKED];
 
+/// The packed form of the `salt || signature`
+pub type PackedSignature = [u8; SIG_LEN];
+
 /// The unpacked form of a public key, represented as
 /// `PK_LEN_UNPACKED` coefficients in the range of [0, FALCON_Q).
 pub type UnpackedPublicKey = [u16; PK_LEN_UNPACKED];

@@ -189,7 +189,7 @@ mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
     use crate::falcon::utils::test::{
-        bits_to_buf, push_coeff, sample_14bit_coeff, set_coeff_14bit_packed,
+        bits_to_buf, create_mock_signature, push_coeff, sample_14bit_coeff, set_coeff_14bit_packed,
     };
     use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, S2_COMPRESSED_LEN, SIG_LEN};
     use rand::rngs::StdRng;
@@ -255,25 +255,7 @@ mod tests {
         // Deterministic seeded RNG so the test is reproducible.
         let mut rng = StdRng::seed_from_u64(0xABCD1234);
 
-        // Seeded-random signature bytes.
-        let mut sig = [0u8; SIG_LEN];
-        for b in sig[..40].iter_mut() {
-            *b = rng.random::<u8>();
-        }
-
-        let mut sig_coefficients = Vec::new();
-        for _ in 0..512 {
-            sig_coefficients.push(rng.random::<i8>() as i32);
-        }
-        let mut s2_compressed_bits: Vec<u8> = Vec::new();
-        for &coeff in sig_coefficients.iter() {
-            push_coeff(&mut s2_compressed_bits, coeff);
-        }
-
-        // append sig_coefficients after the salt
-        let s2_compressed = bits_to_buf::<S2_COMPRESSED_LEN>(&s2_compressed_bits);
-        assert_eq!(SIG_LEN, 40 + s2_compressed.len());
-        sig[40..40 + s2_compressed.len()].copy_from_slice(s2_compressed.as_slice());
+        let (sig, sig_coefficients) = create_mock_signature();
 
         // Seeded-random valid coefficients (< q) for pk and challenge.
         let mut pk_coeffs = [0u16; FALCON_N];
@@ -305,10 +287,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0xABCD1234);
 
         // Seeded-random signature bytes.
-        let mut sig = [0u8; SIG_LEN];
-        for b in sig.iter_mut() {
-            *b = rng.random::<u8>();
-        }
+        let (sig, _sig_coefficients) = create_mock_signature();
 
         // Seeded-random valid coefficients (< q) for pk and challenge.
         let mut pk_coeffs = [0u16; FALCON_N];
@@ -324,7 +303,8 @@ mod tests {
         // Corrupt one challenge coefficient after packing: set it to Q (invalid: must be < Q).
         set_coeff_14bit_packed(challenge_packed.as_mut(), 123, FALCON_Q);
         // Padding must remain canonical.
-        assert_eq!(challenge_packed[CHALLENGE_LEN - 1], 0);
+        assert_eq!(pk_packed[0], 0);
+        assert_eq!(challenge_packed[0], 0);
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);

@@ -135,7 +135,7 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
     const _: () = assert!(COEFF_BYTES == 896);
 
     // If there is a padding byte, require it to be zero for canonical encoding.
-    if input[COEFF_BYTES] != 0 {
+    if input[0] != 0 {
         return Err(FalconError::InvalidFieldElement);
     }
 
@@ -156,7 +156,7 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
         }
     }
 
-    let (coeff_bytes, _pad) = input.split_at(COEFF_BYTES as usize);
+    let (_pad, coeff_bytes) = input.split_at(1);
 
     for &b in coeff_bytes {
         acc = (acc << 8) | (b as u32);
@@ -206,7 +206,7 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
     const _: () = assert!(BYTES_TO_WRITE + 1 == CHALLENGE_LEN);
 
     let mut out = Box::new([0u8; BYTES_TO_WRITE + 1]);
-    let out_writable = &mut out[..BYTES_TO_WRITE];
+    let out_writable = &mut out[1..BYTES_TO_WRITE + 1];
     let mut bits_written = 0;
 
     for c in 0..FALCON_N {
@@ -245,7 +245,7 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
             bits_written += take;
         }
     }
-    if bits_written != BITS_TO_WRITE || out[CHALLENGE_LEN - 1] != 0 {
+    if bits_written != BITS_TO_WRITE || out[0] != 0 {
         return Err(FalconError::InternalEncoding);
     }
     Ok(out)
@@ -557,7 +557,7 @@ mod tests {
 
             set_coeff_14bit_packed(&mut polynomial, i, FALCON_Q);
             // Padding must remain canonical.
-            assert_eq!(polynomial[CHALLENGE_LEN - 1], 0);
+            assert_eq!(polynomial[0], 0);
 
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
@@ -583,7 +583,7 @@ mod tests {
         for _ in 0..128 {
             let coeffs = create_sample_falcon_coefficients();
             let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
-            polynomial[896] = rng.random_range(1..255);
+            polynomial[0] = rng.random_range(1..255);
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
         }

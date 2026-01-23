@@ -31,9 +31,14 @@ pub(super) fn read_u16_be(r: &mut impl sha3::digest::XofReader) -> u16 {
 
 #[cfg(test)]
 pub(in crate::falcon) mod test {
-    use crate::falcon::{CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q};
+    use crate::falcon::{
+        PackedSignature, UnpackedSignature, CHALLENGE_LEN, COEFF_BITS, FALCON_N, FALCON_Q,
+        S2_COMPRESSED_LEN, SIG_LEN,
+    };
 
     use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     fn dummy_output(gas: u64, data: &[u8]) -> PrecompileOutput {
         PrecompileOutput::new(gas, Bytes::copy_from_slice(data))
@@ -158,7 +163,7 @@ pub(in crate::falcon) mod test {
         debug_assert!(coeff_index < FALCON_N);
         debug_assert!((val as u32) < (1u32 << COEFF_BITS));
 
-        let bit_pos = coeff_index * (COEFF_BITS as usize);
+        let bit_pos = coeff_index * (COEFF_BITS as usize) + 8;
         for j in 0..(COEFF_BITS as usize) {
             let bit = ((val >> ((COEFF_BITS as usize - 1) - j)) & 1) as u8;
             let global = bit_pos + j;
@@ -172,5 +177,31 @@ pub(in crate::falcon) mod test {
                 buf[byte_index] &= !mask;
             }
         }
+    }
+
+    pub(in crate::falcon) fn create_mock_signature() -> (PackedSignature, Vec<i32>) {
+        // Deterministic seeded RNG.
+        let mut rng = StdRng::seed_from_u64(0xABCD1234);
+
+        // Seeded-random signature bytes.
+        let mut sig = [0u8; SIG_LEN];
+        for b in sig[..40].iter_mut() {
+            *b = rng.random::<u8>();
+        }
+
+        let mut sig_coefficients = Vec::new();
+        for _ in 0..512 {
+            sig_coefficients.push(rng.random::<i8>() as i32);
+        }
+        let mut s2_compressed_bits: Vec<u8> = Vec::new();
+        for &coeff in sig_coefficients.iter() {
+            push_coeff(&mut s2_compressed_bits, coeff);
+        }
+
+        // append sig_coefficients after the salt
+        let s2_compressed = bits_to_buf::<S2_COMPRESSED_LEN>(&s2_compressed_bits);
+        assert_eq!(SIG_LEN, 40 + s2_compressed.len());
+        sig[40..40 + s2_compressed.len()].copy_from_slice(s2_compressed.as_slice());
+        (sig, sig_coefficients)
     }
 }
