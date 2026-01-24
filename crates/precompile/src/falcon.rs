@@ -41,6 +41,9 @@ mod ntt_consts;
 mod sig_reader;
 mod utils;
 
+#[cfg(test)]
+mod kat;
+
 /// The gas cost to invoke a Falcon hash-to-point precompile
 const H2P_GAS: u64 = 1000;
 
