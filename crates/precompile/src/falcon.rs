@@ -61,9 +61,9 @@ pub const MSG_LEN: usize = 32;
 /// This includes the salt and compressed signature vector as defined by EIP-8052.
 pub const SIG_LEN: usize = 666;
 
-/// Length in bytes of 512 14-bit coefficients packed together and a padding byte,
+/// Length in bytes of 512 14-bit coefficients packed together,
 /// used for public keys in falcon signatures, and for falcon challenge polynomials.
-pub const PACKED_POLY_LEN: usize = 897;
+pub const PACKED_POLY_LEN: usize = 896;
 
 /// Length in bytes of a Falcon-512 public key (packed).
 ///

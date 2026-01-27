@@ -134,11 +134,6 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
     const _: () = assert!((FALCON_N * (COEFF_BITS as usize)) % 8 == 0);
     const _: () = assert!(COEFF_BYTES == 896);
 
-    // If there is a padding byte, require it to be zero for canonical encoding.
-    if input[0] != 0 {
-        return Err(FalconError::InvalidFieldElement);
-    }
-
     let mut out = [0u16; FALCON_N];
 
     let mut acc: u32 = 0;
@@ -156,9 +151,7 @@ pub(super) fn unpack_falcon_14bit_be_polynomial(
         }
     }
 
-    let (_pad, coeff_bytes) = input.split_at(1);
-
-    for &b in coeff_bytes {
+    for &b in input {
         acc = (acc << 8) | (b as u32);
         acc_bits += 8;
 
@@ -201,12 +194,11 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
     const BITS_TO_WRITE: usize = FALCON_N * COEFF_BITS as usize;
     const BYTES_TO_WRITE: usize = BITS_TO_WRITE / 8;
 
-    // Compile-time invariants (evalutated during const evaluation and not at runtime)
+    // Compile-time invariant (evalutated during const evaluation and not at runtime)
     const _: () = assert!(BITS_TO_WRITE % 8 == 0);
-    const _: () = assert!(BYTES_TO_WRITE + 1 == CHALLENGE_LEN);
 
-    let mut out = Box::new([0u8; BYTES_TO_WRITE + 1]);
-    let out_writable = &mut out[1..BYTES_TO_WRITE + 1];
+
+    let mut out = Box::new([0u8; BYTES_TO_WRITE]);
     let mut bits_written = 0;
 
     for c in 0..FALCON_N {
@@ -231,7 +223,7 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
             let left_shift = (8 - bit_offset) - take;
 
             // panic-free index access
-            let dst = out_writable
+            let dst = out
                 .get_mut(byte_pos)
                 .ok_or(FalconError::InternalEncoding)?;
             *dst |= write_bits << left_shift;
@@ -245,7 +237,7 @@ pub(super) fn pack_falcon_14bit_be_polynomial(
             bits_written += take;
         }
     }
-    if bits_written != BITS_TO_WRITE || out[0] != 0 {
+    if bits_written != BITS_TO_WRITE {
         return Err(FalconError::InternalEncoding);
     }
     Ok(out)
@@ -556,8 +548,6 @@ mod tests {
             let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
 
             set_coeff_14bit_packed(&mut polynomial, i, FALCON_Q);
-            // Padding must remain canonical.
-            assert_eq!(polynomial[0], 0);
 
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
@@ -574,18 +564,6 @@ mod tests {
             let result = unpack_falcon_14bit_be_polynomial(&polynomial);
             assert!(result.is_ok());
             assert_eq!(result.unwrap(), coeffs);
-        }
-    }
-
-    #[test]
-    fn test_unpack_falcon_14bit_be_polynomial_invalid_if_last_byte_nonzero() {
-        let mut rng = rand::rng();
-        for _ in 0..128 {
-            let coeffs = create_sample_falcon_coefficients();
-            let mut polynomial = pack_falcon_14bit_be_polynomial(&coeffs).unwrap();
-            polynomial[0] = rng.random_range(1..255);
-            let result = unpack_falcon_14bit_be_polynomial(&polynomial);
-            assert!(matches!(result, Err(FalconError::InvalidFieldElement)));
         }
     }
 

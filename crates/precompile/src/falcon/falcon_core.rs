@@ -13,7 +13,7 @@ use crate::{
         ntt::{intt, normalize_in_place, ntt, pointwise_mul_in_place},
         sig_reader::SigReader,
         utils::map_falcon_result,
-        UnpackedPublicKey, UnpackedSignature, ACCEPTANCE_BOUND_BETA2, FALCON_CORE_VERIFY_GAS,
+        ACCEPTANCE_BOUND_BETA2, FALCON_CORE_VERIFY_GAS,
         FALCON_N, FALCON_Q,
     },
     utilities::bool_to_bytes32,
@@ -189,11 +189,11 @@ mod tests {
     use super::*;
     use crate::falcon::encoding::pack_falcon_14bit_be_polynomial;
     use crate::falcon::utils::test::{
-        bits_to_buf, create_mock_signature, push_coeff, sample_14bit_coeff, set_coeff_14bit_packed,
+        create_mock_signature, sample_14bit_coeff, set_coeff_14bit_packed,
     };
     use crate::falcon::{CHALLENGE_LEN, FALCON_Q, PK_LEN, S2_COMPRESSED_LEN, SIG_LEN};
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{SeedableRng};
 
     #[test]
     fn test_extract_inputs_if_valid_with_invalid_length() {
@@ -302,9 +302,6 @@ mod tests {
 
         // Corrupt one challenge coefficient after packing: set it to Q (invalid: must be < Q).
         set_coeff_14bit_packed(challenge_packed.as_mut(), 123, FALCON_Q);
-        // Padding must remain canonical.
-        assert_eq!(pk_packed[0], 0);
-        assert_eq!(challenge_packed[0], 0);
 
         // One contiguous input buffer: sig || pk || challenge
         let mut input = Vec::with_capacity(SIG_LEN + PK_LEN + CHALLENGE_LEN);

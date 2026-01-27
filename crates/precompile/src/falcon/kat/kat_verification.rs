@@ -59,11 +59,10 @@ fn kat_h2p_shake256(salt: &[u8; SALT_LEN], msg: &[u8]) -> [u16; FALCON_N] {
 fn kat_pk_to_packed_poly(pk: &[u8]) -> PackedFalconPolynomial {
     assert_eq!(pk.len(), 897, "expected Falcon-512 pk length");
 
-    // KAT pk encoding is: header(1 byte, typically 0x09) || 896 bytes of 14-bit packed coeffs.
+    // KAT pk encoding is: 1 header byte + 896 bytes of 14-bit packed coeffs.
     // Our internal packed polynomial format uses a leading 0 padding byte instead.
-    let mut out = [0u8; 897];
-    out[0] = 0;
-    out[1..].copy_from_slice(&pk[1..]);
+    let mut out = [0u8; 896];
+    out.copy_from_slice(&pk[1..]);
     out
 }
 

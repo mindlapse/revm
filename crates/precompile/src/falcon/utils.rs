@@ -163,7 +163,7 @@ pub(in crate::falcon) mod test {
         debug_assert!(coeff_index < FALCON_N);
         debug_assert!((val as u32) < (1u32 << COEFF_BITS));
 
-        let bit_pos = coeff_index * (COEFF_BITS as usize) + 8;
+        let bit_pos = coeff_index * (COEFF_BITS as usize);
         for j in 0..(COEFF_BITS as usize) {
             let bit = ((val >> ((COEFF_BITS as usize - 1) - j)) & 1) as u8;
             let global = bit_pos + j;
